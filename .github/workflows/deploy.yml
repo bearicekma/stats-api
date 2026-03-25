@@ -28,4 +28,4 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --project ${{ secrets.GCP_PROJECT_ID }} \
-            --set-env-vars="ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},ESTAT_APP_ID=${{ secrets.ESTAT_APP_ID }},LINE_CHANNEL_ACCESS_TOKEN=${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }},LINE_USER_ID=${{ secrets.LINE_USER_ID }}"
+            --set-env-vars="ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},ESTAT_APP_ID=${{ secrets.ESTAT_APP_ID }},GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }},GMAIL_APP_PASSWORD=${{ secrets.GMAIL_APP_PASSWORD }}"
