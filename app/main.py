@@ -7,7 +7,6 @@ import os
 
 app = FastAPI(title="Stats API")
 
-# e-Stat APIの1回あたりの最大取得件数
 ESTAT_LIMIT = 100000
 
 @app.get("/")
@@ -37,57 +36,128 @@ def get_collection(collection_name: str):
         "data":       data
     }
 
-@app.get("/passthrough/{stats_data_id}")
-async def passthrough(stats_data_id: str):
+def build_code_to_name_map(class_info: list) -> dict:
     """
-    e-Stat APIをページネーションで全件取得してそのまま返す
+    class_infoからコード→名称の変換辞書を作成する
+
+    戻り値の構造:
+    {
+        "cat01": {"label": "男女", "codes": {"001": "総数", "002": "男"}},
+        "area":  {"label": "地域", "codes": {"00000": "全国", "01000": "北海道"}},
+    }
+    """
+    code_map = {}
+
+    for class_obj in class_info:
+        class_id   = class_obj["@id"]    # 例: "cat01"
+        class_name = class_obj["@name"]  # 例: "男女"
+
+        classes = class_obj.get("CLASS", [])
+
+        # CLASSが辞書（1件のみ）の場合はリストに変換する
+        if isinstance(classes, dict):
+            classes = [classes]
+
+        code_map[class_id] = {
+            "label": class_name,                                 # 列名に使う日本語名
+            "codes": {c["@code"]: c["@name"] for c in classes}  # コード→名称の辞書
+        }
+
+    return code_map
+
+def convert_row(row: dict, code_map: dict) -> dict:
+    """
+    1行分のデータのコードを名称に変換する
+
+    変換前: {"@cat01": "002", "@area": "01000", "@time": "2020100000", "$": "1250000"}
+    変換後: {"男女": "男", "地域": "北海道", "時間軸": "2020年10月", "値": 1250000}
+    """
+    converted = {}
+
+    for key, value in row.items():
+        if key == "$":
+            # $は実際の数値なので「値」に変換する
+            try:
+                converted["値"] = float(value) if "." in str(value) else int(value)
+            except (ValueError, TypeError):
+                converted["値"] = value
+
+        elif key.startswith("@"):
+            # @cat01 → cat01 のようにアットマークを除去する
+            field_id = key[1:]
+
+            if field_id in code_map:
+                # 列名を日本語名に変換する（例: cat01 → 男女）
+                col_name = code_map[field_id]["label"]
+
+                # コードを名称に変換する（例: 002 → 男）
+                codes = code_map[field_id]["codes"]
+                converted[col_name] = codes.get(value, value)
+            else:
+                # code_mapにないキーはそのまま残す
+                converted[field_id] = value
+
+    return converted
+
+@app.get("/estat/pass/{stats_data_id}")
+async def estat_pass(stats_data_id: str):
+    """
+    e-Stat APIをページネーションで全件取得し
+    コードを日本語名称に変換してから返す
     Claude・Firestoreは使わないので費用ゼロ
 
     stats_data_id : e-Statの統計表ID
-    例: /passthrough/0003448237
+    例: /estat/pass/0003448237
     """
     app_id         = os.environ["ESTAT_APP_ID"]
-    all_values     = []   # 全ページのデータを格納するリスト
-    start_position = 1    # 取得開始位置（1始まり）
+    all_values     = []
+    start_position = 1
+    class_info     = None  # 分類情報（最初のページから取得）
 
     async with httpx.AsyncClient() as client:
         while True:
-            # e-Stat APIを呼び出す
             response = await client.get(
                 "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
                 params={
                     "appId":         app_id,
                     "statsDataId":   stats_data_id,
                     "lang":          "J",
-                    "limit":         ESTAT_LIMIT,    # 1回あたり最大10万件
-                    "startPosition": start_position, # 取得開始位置
+                    "limit":         ESTAT_LIMIT,
+                    "startPosition": start_position,
                 },
-                timeout=60  # データが多い場合は時間がかかるので60秒に設定
+                timeout=60
             )
             response.raise_for_status()
             raw_json = response.json()
 
-            # 総件数と今回の終了位置を取得する
-            result_inf   = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]
-            total_number = int(result_inf["TOTAL_NUMBER"])  # 総件数
-            to_number    = int(result_inf["TO_NUMBER"])     # 今回の終了位置
+            statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
+            result_inf       = statistical_data["RESULT_INF"]
+            total_number     = int(result_inf["TOTAL_NUMBER"])
+            to_number        = int(result_inf["TO_NUMBER"])
 
-            # 今回取得したデータをリストに追加する
-            values = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+            # 分類情報は最初のページだけ取得する
+            if class_info is None:
+                class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
+
+            values = statistical_data["DATA_INF"]["VALUE"]
             all_values.extend(values)
 
-            # 全件取得完了したらループを抜ける
             if to_number >= total_number:
                 break
 
-            # 次のページの開始位置を設定する
             start_position = to_number + 1
+
+    # コード→名称の変換辞書を作成する
+    code_map = build_code_to_name_map(class_info)
+
+    # 全行のコードを名称に変換する
+    converted_data = [convert_row(row, code_map) for row in all_values]
 
     return {
         "stats_data_id": stats_data_id,
         "fetched_at":    str(datetime.now()),
-        "count":         len(all_values),  # 取得した総件数
-        "data":          all_values        # 全データ
+        "count":         len(converted_data),
+        "data":          converted_data  # コードが日本語名称に変換済みのデータ
     }
 
 @app.post("/collect")
