@@ -36,6 +36,50 @@ def get_collection(collection_name: str):
         "data":       data
     }
 
+# e-Statの統計表IDのメタ情報（設定可能なパラメータ一覧）を返す
+# 例: /estat/meta/0003427113
+@app.get("/estat/meta/{stats_data_id}")
+async def estat_meta(stats_data_id: str):
+    app_id = os.environ["ESTAT_APP_ID"]
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
+            params={
+                "appId":       app_id,
+                "statsDataId": stats_data_id,
+                "lang":        "J",
+            },
+            timeout=30
+        )
+    response.raise_for_status()
+    raw_json = response.json()
+
+    class_info = raw_json["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
+
+    # CLASSが辞書（1件のみ）の場合はリストに変換する
+    if isinstance(class_info, dict):
+        class_info = [class_info]
+
+    # 各パラメータのコード一覧を整形して返す
+    result = []
+    for obj in class_info:
+        classes = obj.get("CLASS", [])
+        if isinstance(classes, dict):
+            classes = [classes]
+
+        result.append({
+            "parameter": f"cd{obj['@id'].capitalize()}",  # 例: cdTab, cdCat01
+            "name":      obj["@name"],                    # 例: 表章項目, 2020年基準品目
+            "count":     len(classes),                    # 選択肢の件数
+            "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
+        })
+
+    return {
+        "stats_data_id": stats_data_id,
+        "parameters":    result
+    }
+
 # class_infoからコード→名称の変換辞書を作成する
 def build_code_to_name_map(class_info: list) -> dict:
     code_map = {}
@@ -84,7 +128,6 @@ def convert_row(row: dict, code_map: dict) -> dict:
 # e-Stat APIをページネーションで全件取得しコードを名称に変換して返す
 # URLのクエリパラメータをそのままe-Stat APIに渡す汎用設計
 # 例: /estat/pass/0003427113?cdArea=00000,13A01,20A01&cdTimeFrom=2024000000
-# 例: /estat/pass/0003427113?cdArea=00000&cdCat01=001&cdTimeTo=2024999999
 @app.get("/estat/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
     app_id         = os.environ["ESTAT_APP_ID"]
@@ -93,11 +136,9 @@ async def estat_pass(stats_data_id: str, request: Request):
     class_info     = None
     total_number   = 0
 
-    # URLのクエリパラメータを全て取得する
-    # 例: ?cdArea=00000&cdTimeFrom=2020000000 → {"cdArea": "00000", "cdTimeFrom": "2020000000"}
+    # URLのクエリパラメータを全て取得してe-Stat APIにそのまま渡す
     query_params = dict(request.query_params)
 
-    # e-Stat APIの固定パラメータを設定する
     params = {
         "appId":         app_id,
         "statsDataId":   stats_data_id,
@@ -106,8 +147,6 @@ async def estat_pass(stats_data_id: str, request: Request):
         "startPosition": start_position,
     }
 
-    # URLで指定された全クエリパラメータをそのままe-Stat APIに追加する
-    # e-Stat APIのパラメータ名（cdArea, cdTimeFrom など）をそのまま使う
     params.update(query_params)
 
     async with httpx.AsyncClient() as client:
