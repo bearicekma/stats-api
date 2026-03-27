@@ -94,8 +94,7 @@ async def estat_meta(stats_data_id: str):
 
     return {
         "stats_data_id":        stats_data_id,
-        "total_number":         total,         # 数値
-        "total_number_display": f"{total:,}",  # カンマ区切り
+        "total_number": f"{total:,} 件",  # カンマ区切り
         "parameters":           parameters
     }
 
