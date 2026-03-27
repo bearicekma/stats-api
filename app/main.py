@@ -113,7 +113,7 @@ async def estat_count(stats_data_id: str, request: Request):
 
     return {
         "stats_data_id": stats_data_id,
-        "total_number":  int(result_inf["TOTAL_NUMBER"]),  # 絞り込み後の総件数
+        "total_number": f"{int(result_inf['TOTAL_NUMBER']):,}", # カンマ区切り文字列
         "query_params":  query_params,                     # 使用したクエリパラメータ
         "checked_at":    str(datetime.now()),
     }
