@@ -57,11 +57,9 @@ async def estat_meta(stats_data_id: str):
 
     class_info = raw_json["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
 
-    # CLASSが辞書（1件のみ）の場合はリストに変換する
     if isinstance(class_info, dict):
         class_info = [class_info]
 
-    # 各パラメータのコード一覧を整形して返す
     result = []
     for obj in class_info:
         classes = obj.get("CLASS", [])
@@ -69,15 +67,55 @@ async def estat_meta(stats_data_id: str):
             classes = [classes]
 
         result.append({
-            "parameter": f"cd{obj['@id'].capitalize()}",  # 例: cdTab, cdCat01
-            "name":      obj["@name"],                    # 例: 表章項目, 2020年基準品目
-            "count":     len(classes),                    # 選択肢の件数
+            "parameter": f"cd{obj['@id'].capitalize()}",
+            "name":      obj["@name"],
+            "count":     len(classes),
             "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
         })
 
     return {
         "stats_data_id": stats_data_id,
         "parameters":    result
+    }
+
+# e-Statの統計表IDの総件数を返す（1件だけ取得して確認するので高速）
+# URLのクエリパラメータをそのままe-Stat APIに渡せる
+# 例: /estat/count/0003427113
+# 例: /estat/count/0003427113?cdArea=00000,13A01,20A01&cdTimeFrom=2024000000
+@app.get("/estat/count/{stats_data_id}")
+async def estat_count(stats_data_id: str, request: Request):
+    app_id = os.environ["ESTAT_APP_ID"]
+
+    # URLのクエリパラメータをそのまま取得する
+    query_params = dict(request.query_params)
+
+    # 1件だけ取得して総件数を確認する（データ取得コストを最小化）
+    params = {
+        "appId":         app_id,
+        "statsDataId":   stats_data_id,
+        "lang":          "J",
+        "limit":         1,
+        "startPosition": 1,
+    }
+
+    params.update(query_params)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
+            params=params,
+            timeout=30
+        )
+    response.raise_for_status()
+    raw_json = response.json()
+
+    result_inf = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]
+
+    return {
+        "stats_data_id": stats_data_id,
+        "total_number":  int(result_inf["TOTAL_NUMBER"]),  # 絞り込み後の総件数
+        "query_params":  query_params,                     # 使用したクエリパラメータ
+        "checked_at":    str(datetime.now()),
     }
 
 # class_infoからコード→名称の変換辞書を作成する
@@ -101,8 +139,6 @@ def build_code_to_name_map(class_info: list) -> dict:
     return code_map
 
 # 1行分のデータのコードを名称に変換する
-# 変換前: {"@cat01": "002", "@area": "00000", "$": "1250000"}
-# 変換後: {"分類": "総合", "地域": "全国", "値": 1250000}
 def convert_row(row: dict, code_map: dict) -> dict:
     converted = {}
 
@@ -136,7 +172,6 @@ async def estat_pass(stats_data_id: str, request: Request):
     class_info     = None
     total_number   = 0
 
-    # URLのクエリパラメータを全て取得してe-Stat APIにそのまま渡す
     query_params = dict(request.query_params)
 
     params = {
