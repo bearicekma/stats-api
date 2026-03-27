@@ -36,14 +36,16 @@ def get_collection(collection_name: str):
         "data":       data
     }
 
-# e-Statの統計表IDのメタ情報（設定可能なパラメータ一覧）を返す
+# e-Statの統計表IDのメタ情報（パラメータ一覧＋総件数）を返す
 # 例: /estat/meta/0003427113
 @app.get("/estat/meta/{stats_data_id}")
 async def estat_meta(stats_data_id: str):
     app_id = os.environ["ESTAT_APP_ID"]
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(
+
+        # メタ情報（パラメータ一覧）を取得する
+        meta_response = await client.get(
             "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
             params={
                 "appId":       app_id,
@@ -52,70 +54,49 @@ async def estat_meta(stats_data_id: str):
             },
             timeout=30
         )
-    response.raise_for_status()
-    raw_json = response.json()
+        meta_response.raise_for_status()
 
-    class_info = raw_json["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
+        # 総件数を取得する（1件だけ取得してRESULT_INFを確認する）
+        count_response = await client.get(
+            "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
+            params={
+                "appId":         app_id,
+                "statsDataId":   stats_data_id,
+                "lang":          "J",
+                "limit":         1,
+                "startPosition": 1,
+            },
+            timeout=30
+        )
+        count_response.raise_for_status()
+
+    # メタ情報を整形する
+    class_info = meta_response.json()["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
 
     if isinstance(class_info, dict):
         class_info = [class_info]
 
-    result = []
+    parameters = []
     for obj in class_info:
         classes = obj.get("CLASS", [])
         if isinstance(classes, dict):
             classes = [classes]
 
-        result.append({
+        parameters.append({
             "parameter": f"cd{obj['@id'].capitalize()}",
             "name":      obj["@name"],
             "count":     len(classes),
             "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
         })
 
-    return {
-        "stats_data_id": stats_data_id,
-        "parameters":    result
-    }
-
-# e-Statの統計表IDの総件数を返す（1件だけ取得して確認するので高速）
-# URLのクエリパラメータをそのままe-Stat APIに渡せる
-# 例: /estat/count/0003427113
-# 例: /estat/count/0003427113?cdArea=00000,13A01,20A01&cdTimeFrom=2024000000
-@app.get("/estat/count/{stats_data_id}")
-async def estat_count(stats_data_id: str, request: Request):
-    app_id = os.environ["ESTAT_APP_ID"]
-
-    # URLのクエリパラメータをそのまま取得する
-    query_params = dict(request.query_params)
-
-    # 1件だけ取得して総件数を確認する（データ取得コストを最小化）
-    params = {
-        "appId":         app_id,
-        "statsDataId":   stats_data_id,
-        "lang":          "J",
-        "limit":         1,
-        "startPosition": 1,
-    }
-
-    params.update(query_params)
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-            params=params,
-            timeout=30
-        )
-    response.raise_for_status()
-    raw_json = response.json()
-
-    result_inf = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]
+    # 総件数を取得する
+    total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
 
     return {
-        "stats_data_id": stats_data_id,
-        "total_number": f"{int(result_inf['TOTAL_NUMBER']):,}", # カンマ区切り文字列
-        "query_params":  query_params,                     # 使用したクエリパラメータ
-        "checked_at":    str(datetime.now()),
+        "stats_data_id":        stats_data_id,
+        "total_number":         total,         # 数値
+        "total_number_display": f"{total:,}",  # カンマ区切り
+        "parameters":           parameters
     }
 
 # class_infoからコード→名称の変換辞書を作成する
