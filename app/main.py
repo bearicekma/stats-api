@@ -1,8 +1,10 @@
-from fastapi       import FastAPI, BackgroundTasks, Request
-from datetime      import datetime
-from app.database  import get_stats
-from app.collector import run_all_collections
+from fastapi           import FastAPI, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
+from datetime          import datetime
+from app.database      import get_stats
+from app.collector     import run_all_collections
 import httpx
+import json
 import os
 
 app = FastAPI(title="Stats API")
@@ -25,7 +27,6 @@ def get_sample():
         ]
     }
 
-# Firestoreから保存済みデータを返す（保存方式）
 @app.get("/stats/{collection_name}")
 def get_collection(collection_name: str):
     data = get_stats(collection_name)
@@ -36,43 +37,26 @@ def get_collection(collection_name: str):
         "data":       data
     }
 
-# e-Statの統計表IDのメタ情報（パラメータ一覧＋総件数）を返す
-# 例: /estat/meta/0003427113
 @app.get("/estat/meta/{stats_data_id}")
 async def estat_meta(stats_data_id: str):
     app_id = os.environ["ESTAT_APP_ID"]
 
     async with httpx.AsyncClient() as client:
-
-        # メタ情報（パラメータ一覧）を取得する
         meta_response = await client.get(
             "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
-            params={
-                "appId":       app_id,
-                "statsDataId": stats_data_id,
-                "lang":        "J",
-            },
+            params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J"},
             timeout=30
         )
         meta_response.raise_for_status()
 
-        # 総件数を取得する（1件だけ取得してRESULT_INFを確認する）
         count_response = await client.get(
             "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-            params={
-                "appId":         app_id,
-                "statsDataId":   stats_data_id,
-                "lang":          "J",
-                "limit":         1,
-                "startPosition": 1,
-            },
+            params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J", "limit": 1, "startPosition": 1},
             timeout=30
         )
         count_response.raise_for_status()
 
-    # メタ情報を整形する
     class_info = meta_response.json()["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
-
     if isinstance(class_info, dict):
         class_info = [class_info]
 
@@ -81,7 +65,6 @@ async def estat_meta(stats_data_id: str):
         classes = obj.get("CLASS", [])
         if isinstance(classes, dict):
             classes = [classes]
-
         parameters.append({
             "parameter": f"cd{obj['@id'].capitalize()}",
             "name":      obj["@name"],
@@ -89,61 +72,46 @@ async def estat_meta(stats_data_id: str):
             "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
         })
 
-    # 総件数を取得する
     total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
 
     return {
-        "stats_data_id":        stats_data_id,
-        "total_number": f"{total:,} 件",  # カンマ区切り
-        "parameters":           parameters
+        "stats_data_id": stats_data_id,
+        "total_number":  f"{total:,} 件",
+        "parameters":    parameters
     }
 
-# class_infoからコード→名称の変換辞書を作成する
 def build_code_to_name_map(class_info: list) -> dict:
     code_map = {}
-
     for class_obj in class_info:
         class_id   = class_obj["@id"]
         class_name = class_obj["@name"]
-
-        classes = class_obj.get("CLASS", [])
-
+        classes    = class_obj.get("CLASS", [])
         if isinstance(classes, dict):
             classes = [classes]
-
         code_map[class_id] = {
             "label": class_name,
             "codes": {c["@code"]: c["@name"] for c in classes}
         }
-
     return code_map
 
-# 1行分のデータのコードを名称に変換する
 def convert_row(row: dict, code_map: dict) -> dict:
     converted = {}
-
     for key, value in row.items():
         if key == "$":
             try:
                 converted["値"] = float(value) if "." in str(value) else int(value)
             except (ValueError, TypeError):
                 converted["値"] = value
-
         elif key.startswith("@"):
             field_id = key[1:]
-
             if field_id in code_map:
                 col_name = code_map[field_id]["label"]
                 codes    = code_map[field_id]["codes"]
                 converted[col_name] = codes.get(value, value)
             else:
                 converted[field_id] = value
-
     return converted
 
-# e-Stat APIをページネーションで全件取得しコードを名称に変換して返す
-# URLのクエリパラメータをそのままe-Stat APIに渡す汎用設計
-# 例: /estat/pass/0003427113?cdArea=00000,13A01,20A01&cdTimeFrom=2024000000
 @app.get("/estat/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
     app_id         = os.environ["ESTAT_APP_ID"]
@@ -152,30 +120,25 @@ async def estat_pass(stats_data_id: str, request: Request):
     class_info     = None
     total_number   = 0
 
-    query_params = dict(request.query_params)
-
     params = {
-        "appId":         app_id,
-        "statsDataId":   stats_data_id,
-        "lang":          "J",
-        "limit":         ESTAT_LIMIT,
-        "startPosition": start_position,
+        "appId":       app_id,
+        "statsDataId": stats_data_id,
+        "lang":        "J",
+        "limit":       ESTAT_LIMIT,
     }
+    params.update(dict(request.query_params))
 
-    params.update(query_params)
-
-    async with httpx.AsyncClient() as client:
+    # e-Statから全件取得
+    async with httpx.AsyncClient(timeout=300) as client:
         while True:
             params["startPosition"] = start_position
 
             response = await client.get(
                 "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
                 params=params,
-                timeout=60
             )
             response.raise_for_status()
-            raw_json = response.json()
-
+            raw_json         = response.json()
             statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
             result_inf       = statistical_data["RESULT_INF"]
             total_number     = int(result_inf["TOTAL_NUMBER"])
@@ -184,26 +147,34 @@ async def estat_pass(stats_data_id: str, request: Request):
             if class_info is None:
                 class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
 
-            values = statistical_data["DATA_INF"]["VALUE"]
-            all_values.extend(values)
+            all_values.extend(statistical_data["DATA_INF"]["VALUE"])
 
             if to_number >= total_number:
                 break
-
             start_position = to_number + 1
 
     code_map       = build_code_to_name_map(class_info)
     converted_data = [convert_row(row, code_map) for row in all_values]
+    fetched_at     = str(datetime.now())
 
-    return {
-        "stats_data_id": stats_data_id,
-        "fetched_at":    str(datetime.now()),
-        "total_number":  total_number,
-        "count":         len(converted_data),
-        "data":          converted_data
-    }
+    # StreamingResponseで逐次送信（32MB制限を回避）
+    async def stream_json():
+        yield (
+            '{"stats_data_id":"' + stats_data_id + '",'
+            '"fetched_at":"'     + fetched_at     + '",'
+            '"total_number":'    + str(total_number) + ','
+            '"count":'           + str(len(converted_data)) + ','
+            '"data":['
+        ).encode("utf-8")
 
-# データ収集を手動トリガーする（保存方式用）
+        for i, row in enumerate(converted_data):
+            prefix = b"" if i == 0 else b","
+            yield prefix + json.dumps(row, ensure_ascii=False).encode("utf-8")
+
+        yield b"]}"
+
+    return StreamingResponse(stream_json(), media_type="application/json")
+
 @app.post("/collect")
 async def trigger_collection(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_all_collections)
