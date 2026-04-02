@@ -1,8 +1,10 @@
-from fastapi       import FastAPI, BackgroundTasks, Request
-from datetime      import datetime
-from app.database  import get_stats
-from app.collector import run_all_collections
+from fastapi           import FastAPI, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
+from datetime          import datetime
+from app.database      import get_stats
+from app.collector     import run_all_collections
 import httpx
+import json
 import os
 
 app = FastAPI(title="Stats API")
