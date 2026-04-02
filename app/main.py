@@ -148,7 +148,11 @@ def convert_row(row: dict, code_map: dict) -> dict:
 # 例: /estat/pass/0003427113?cdArea=00000,13A01,20A01
 @app.get("/estat/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
-    app_id = os.environ["ESTAT_APP_ID"]
+    app_id         = os.environ["ESTAT_APP_ID"]
+    all_values     = []
+    start_position = 1
+    class_info     = None
+    total_number   = 0
 
     params = {
         "appId":       app_id,
@@ -158,58 +162,42 @@ async def estat_pass(stats_data_id: str, request: Request):
     }
     params.update(dict(request.query_params))
 
-    async def stream_json():
-        start_position = 1
-        class_info     = None
-        total_number   = 0
-        total_sent     = 0
-        first_row      = True
-        fetched_at     = str(datetime.now())
+    async with httpx.AsyncClient(timeout=300) as client:
+        while True:
+            params["startPosition"] = start_position
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            while True:
-                params["startPosition"] = start_position
+            response = await client.get(
+                "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
+                params=params,
+            )
+            response.raise_for_status()
+            raw_json         = response.json()
+            statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
+            result_inf       = statistical_data["RESULT_INF"]
+            total_number     = int(result_inf["TOTAL_NUMBER"])
+            to_number        = int(result_inf["TO_NUMBER"])
 
-                response = await client.get(
-                    "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-                    params=params,
-                )
-                response.raise_for_status()
-                raw_json         = response.json()
-                statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
-                result_inf       = statistical_data["RESULT_INF"]
-                total_number     = int(result_inf["TOTAL_NUMBER"])
-                to_number        = int(result_inf["TO_NUMBER"])
-                values           = statistical_data["DATA_INF"]["VALUE"]
+            if class_info is None:
+                class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
+                if isinstance(class_info, dict):
+                    class_info = [class_info]
 
-                if class_info is None:
-                    class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
-                    code_map   = build_code_to_name_map(class_info)
+            all_values.extend(statistical_data["DATA_INF"]["VALUE"])
 
-                    # ヘッダーを最初のページで送信
-                    yield (
-                        '{"stats_data_id":"' + stats_data_id + '",'
-                        '"fetched_at":"'     + fetched_at     + '",'
-                        '"total_number":'    + str(total_number) + ','
-                        '"data":['
-                    ).encode("utf-8")
+            if to_number >= total_number:
+                break
+            start_position = to_number + 1
 
-                # このページ分を変換して即送信
-                for row in values:
-                    prefix = b"" if first_row else b","
-                    first_row = False
-                    yield prefix + json.dumps(
-                        convert_row(row, code_map), ensure_ascii=False
-                    ).encode("utf-8")
-                    total_sent += 1
+    code_map       = build_code_to_name_map(class_info)
+    converted_data = [convert_row(row, code_map) for row in all_values]
 
-                if to_number >= total_number:
-                    break
-                start_position = to_number + 1
-
-        yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
-
-    return StreamingResponse(stream_json(), media_type="application/json")
+    return {
+        "stats_data_id": stats_data_id,
+        "fetched_at":    str(datetime.now()),
+        "total_number":  total_number,
+        "count":         len(converted_data),
+        "data":          converted_data
+    }
 
 # データ収集を手動トリガーする（保存方式用）
 @app.post("/collect")
