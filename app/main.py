@@ -28,9 +28,8 @@ def get_sample():
         ]
     }
 
-# GCSのParquetから保存済みデータを返す
+# GCSのParquetからestatデータを返す
 # ?sql= パラメータでDuckDBのWHERE句を指定可能
-# 例: /stats/cpi?sql=年="2024年"
 @app.get("/stats/{collection_name}")
 def get_collection(collection_name: str, request: Request):
 
@@ -38,9 +37,30 @@ def get_collection(collection_name: str, request: Request):
     sql_filter = request.query_params.get("sql", None)
 
     if sql_filter:
-        data = query_stats(collection_name, sql_filter)
+        data = query_stats(collection_name, sql_filter, category="estat")
     else:
-        data = get_stats(collection_name)
+        data = get_stats(collection_name, category="estat")
+
+    return {
+        "collection": collection_name,
+        "updated_at": str(datetime.now()),
+        "count":      len(data),
+        "data":       data
+    }
+
+# GCSのParquetからmasterデータを返す
+# 例: /master/_M_calendar
+# 例: /master/_M_prefecture
+@app.get("/master/{collection_name}")
+def get_master(collection_name: str, request: Request):
+
+    # sqlパラメータがあればDuckDBで絞り込み、なければ全件返す
+    sql_filter = request.query_params.get("sql", None)
+
+    if sql_filter:
+        data = query_stats(collection_name, sql_filter, category="master")
+    else:
+        data = get_stats(collection_name, category="master")
 
     return {
         "collection": collection_name,
