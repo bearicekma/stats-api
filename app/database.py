@@ -5,6 +5,7 @@ from google.cloud import storage
 import pandas as pd
 import duckdb
 import tempfile
+import math
 import os
 
 # ==============================
@@ -34,16 +35,30 @@ def _download_parquet(collection: str, category: str = "estat") -> str:
     return tmp_path
 
 
+def _clean_value(v):
+    """
+    JSON非対応の値をNoneに変換する
+    float型のNaN・inf・-infをNoneに変換する
+    """
+
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    return v
+
+
 def _df_to_records(df: pd.DataFrame) -> list[dict]:
     """
     DataFrameを辞書リストに変換する
-    NaN・inf等のJSON非対応の値をNoneに変換する
+    各値のNaN・inf等をNoneに変換してJSONシリアライズエラーを防ぐ
     """
 
-    # NaN・inf を None に変換（JSONシリアライズエラー対策）
-    df = df.where(pd.notnull(df), None)
+    records = df.to_dict(orient="records")
 
-    return df.to_dict(orient="records")
+    # 各レコードの各値をクリーニング
+    return [
+        {k: _clean_value(v) for k, v in record.items()}
+        for record in records
+    ]
 
 
 def save_stats(collection: str, records: list[dict], category: str = "estat"):
@@ -106,20 +121,4 @@ def query_stats(collection: str, where: str, category: str = "estat") -> list[di
     DuckDBでParquetファイルをSQLクエリして返す
     ?sql= パラメータのWHERE句をそのまま渡す
 
-    例: query_stats("cpi", "年='2024年' AND 地域='全国'")
-    """
-
-    tmp_path = None
-    try:
-        tmp_path = _download_parquet(collection, category)
-        sql      = f"SELECT * FROM read_parquet('{tmp_path}') WHERE {where}"
-        result   = duckdb.query(sql).to_df()
-        return _df_to_records(result)
-
-    except Exception as e:
-        print(f"❌ クエリエラー: {collection}: {e}")
-        return []
-
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    例: query_stats("cpi", "年='2024年' AND 地域='
