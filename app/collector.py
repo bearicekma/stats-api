@@ -1,11 +1,14 @@
+
+# e-Stat APIからデータを取得してGCSに保存する
+
 import httpx
 import os
 from app.processor import process_to_tidy
 from app.database  import save_stats
-from app.notifier  import send_gmail    # Gmail通知をインポート
+from app.notifier  import send_gmail
 
 async def collect_estat(app_id: str, stats_data_id: str, description: str, collection_name: str):
-    """e-Stat APIからデータを取得してFirestoreに保存する"""
+    """e-Stat APIからデータを取得してGCSに保存する"""
 
     url = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
     params = {
@@ -26,8 +29,8 @@ async def collect_estat(app_id: str, stats_data_id: str, description: str, colle
     print(f"🤖 Claude Haiku でデータを加工中: {description}")
     tidy_data = process_to_tidy(raw_text, description)
 
-    for i, data in enumerate(tidy_data):
-        save_stats(collection_name, str(i), data)
+    # 変更点：1件ずつではなく全件まとめてGCSに保存
+    save_stats(collection_name, tidy_data)
 
     print(f"✅ {collection_name}: {len(tidy_data)}件を保存しました")
     return len(tidy_data)

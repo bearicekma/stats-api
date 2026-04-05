@@ -1,7 +1,8 @@
+
 from fastapi           import FastAPI, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from datetime          import datetime
-from app.database      import get_stats
+from app.database      import get_stats, query_stats
 from app.collector     import run_all_collections
 import httpx
 import json
@@ -27,10 +28,20 @@ def get_sample():
         ]
     }
 
-# Firestoreから保存済みデータを返す（保存方式）
+# GCSのParquetから保存済みデータを返す
+# ?sql= パラメータでDuckDBのWHERE句を指定可能
+# 例: /stats/cpi?sql=年="2024年"
 @app.get("/stats/{collection_name}")
-def get_collection(collection_name: str):
-    data = get_stats(collection_name)
+def get_collection(collection_name: str, request: Request):
+
+    # sqlパラメータがあればDuckDBで絞り込み、なければ全件返す
+    sql_filter = request.query_params.get("sql", None)
+
+    if sql_filter:
+        data = query_stats(collection_name, sql_filter)
+    else:
+        data = get_stats(collection_name)
+
     return {
         "collection": collection_name,
         "updated_at": str(datetime.now()),
@@ -95,9 +106,9 @@ async def estat_meta(stats_data_id: str):
     total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
 
     return {
-        "stats_data_id":        stats_data_id,
-        "total_number": f"{total:,} 件",  # カンマ区切り
-        "parameters":           parameters
+        "stats_data_id": stats_data_id,
+        "total_number":  f"{total:,} 件",
+        "parameters":    parameters
     }
 
 # class_infoからコード→名称の変換辞書を作成する
@@ -107,8 +118,7 @@ def build_code_to_name_map(class_info: list) -> dict:
     for class_obj in class_info:
         class_id   = class_obj["@id"]
         class_name = class_obj["@name"]
-
-        classes = class_obj.get("CLASS", [])
+        classes    = class_obj.get("CLASS", [])
 
         if isinstance(classes, dict):
             classes = [classes]
@@ -144,7 +154,6 @@ def convert_row(row: dict, code_map: dict) -> dict:
     return converted
 
 # e-Stat APIをページネーションで全件取得しコードを名称に変換して返す
-# URLのクエリパラメータをそのままe-Stat APIに渡す汎用設計
 # 例: /estat/pass/0003427113?cdArea=00000,13A01,20A01
 @app.get("/estat/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
@@ -199,7 +208,7 @@ async def estat_pass(stats_data_id: str, request: Request):
         "data":          converted_data
     }
 
-# データ収集を手動トリガーする（保存方式用）
+# データ収集を手動トリガーする
 @app.post("/collect")
 async def trigger_collection(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_all_collections)
