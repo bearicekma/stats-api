@@ -20,15 +20,11 @@ bucket = gcs.bucket(BUCKET_NAME)
 def _download_parquet(collection: str, category: str = "estat") -> str:
     """
     GCSからParquetファイルを一時ファイルにダウンロードしてパスを返す
-    内部共通処理（save_stats・get_stats・query_statsで使用）
-
-    category   : "estat" or "master"
-    collection : データの種類（例："population", "_M_calendar"）
+    内部共通処理（get_stats・query_statsで使用）
     """
 
     gcs_path = f"{category}/{collection}/data.parquet"
 
-    # 一時ファイルを作成（呼び出し元でos.remove()すること）
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -36,6 +32,18 @@ def _download_parquet(collection: str, category: str = "estat") -> str:
     blob.download_to_filename(tmp_path)
 
     return tmp_path
+
+
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    """
+    DataFrameを辞書リストに変換する
+    NaN・inf等のJSON非対応の値をNoneに変換する
+    """
+
+    # NaN・inf を None に変換（JSONシリアライズエラー対策）
+    df = df.where(pd.notnull(df), None)
+
+    return df.to_dict(orient="records")
 
 
 def save_stats(collection: str, records: list[dict], category: str = "estat"):
@@ -81,10 +89,8 @@ def get_stats(collection: str, category: str = "estat") -> list[dict]:
     tmp_path = None
     try:
         tmp_path = _download_parquet(collection, category)
-
-        # ParquetファイルをDataFrameとして読み込む
-        df = pd.read_parquet(tmp_path)
-        return df.to_dict(orient="records")
+        df       = pd.read_parquet(tmp_path)
+        return _df_to_records(df)
 
     except Exception as e:
         print(f"❌ データ取得エラー: {collection}: {e}")
@@ -106,11 +112,9 @@ def query_stats(collection: str, where: str, category: str = "estat") -> list[di
     tmp_path = None
     try:
         tmp_path = _download_parquet(collection, category)
-
-        # DuckDBでParquetファイルを直接クエリ
-        sql    = f"SELECT * FROM read_parquet('{tmp_path}') WHERE {where}"
-        result = duckdb.query(sql).to_df()
-        return result.to_dict(orient="records")
+        sql      = f"SELECT * FROM read_parquet('{tmp_path}') WHERE {where}"
+        result   = duckdb.query(sql).to_df()
+        return _df_to_records(result)
 
     except Exception as e:
         print(f"❌ クエリエラー: {collection}: {e}")
