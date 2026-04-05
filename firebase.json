@@ -1,0 +1,15 @@
+{
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json"],
+    "rewrites": [
+      {
+        "source": "/**",
+        "run": {
+          "serviceId": "stats-api",
+          "region": "asia-northeast1"
+        }
+      }
+    ]
+  }
+}
