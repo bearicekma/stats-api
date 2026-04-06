@@ -1,67 +1,29 @@
+# Stats API メインファイル
+# ルーターの登録と共通エンドポイントのみを記載する
 
-from fastapi           import FastAPI, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse
-from datetime          import datetime
-from app.database      import get_stats, query_stats
-from app.collector     import run_all_collections
-import httpx
-import json
-import os
+from fastapi       import FastAPI, BackgroundTasks
+from datetime      import datetime
+from app.database  import get_stats
+from app.collector import run_all_collections
+from app.routers   import estat, boj
 
 app = FastAPI(title="Stats API")
 
-ESTAT_LIMIT = 100000
+# ルーターを登録する
+app.include_router(estat.router)
+app.include_router(boj.router)
+
 
 @app.get("/")
 def root():
+    # 死活確認エンドポイント
     return {"status": "ok", "timestamp": str(datetime.now())}
 
-@app.get("/stats/sample")
-def get_sample():
-    return {
-        "source": "sample",
-        "updated_at": str(datetime.now()),
-        "data": [
-            {"year": 2022, "value": 125.1},
-            {"year": 2023, "value": 127.8},
-            {"year": 2024, "value": 130.2},
-        ]
-    }
 
-# GCSのParquetからestatデータを返す
-# ?sql= パラメータでDuckDBのWHERE句を指定可能
-@app.get("/stats/{collection_name}")
-def get_collection(collection_name: str, request: Request):
-
-    # sqlパラメータがあればDuckDBで絞り込み、なければ全件返す
-    sql_filter = request.query_params.get("sql", None)
-
-    if sql_filter:
-        data = query_stats(collection_name, sql_filter, category="estat")
-    else:
-        data = get_stats(collection_name, category="estat")
-
-    return {
-        "collection": collection_name,
-        "updated_at": str(datetime.now()),
-        "count":      len(data),
-        "data":       data
-    }
-
-# GCSのParquetからmasterデータを返す
-# 例: /master/_M_calendar
-# 例: /master/_M_prefecture
 @app.get("/master/{collection_name}")
-def get_master(collection_name: str, request: Request):
-
-    # sqlパラメータがあればDuckDBで絞り込み、なければ全件返す
-    sql_filter = request.query_params.get("sql", None)
-
-    if sql_filter:
-        data = query_stats(collection_name, sql_filter, category="master")
-    else:
-        data = get_stats(collection_name, category="master")
-
+def get_master(collection_name: str):
+    # GCSのmaster/プレフィックス配下のParquetをDuckDBで読み込んで返す
+    data = get_stats(collection_name, category="master")
     return {
         "collection": collection_name,
         "updated_at": str(datetime.now()),
@@ -69,167 +31,21 @@ def get_master(collection_name: str, request: Request):
         "data":       data
     }
 
-# e-Statの統計表IDのメタ情報（パラメータ一覧＋総件数）を返す
-# 例: /estat/meta/0003427113
-@app.get("/estat/meta/{stats_data_id}")
-async def estat_meta(stats_data_id: str):
-    app_id = os.environ["ESTAT_APP_ID"]
 
-    async with httpx.AsyncClient() as client:
-
-        # メタ情報（パラメータ一覧）を取得する
-        meta_response = await client.get(
-            "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
-            params={
-                "appId":       app_id,
-                "statsDataId": stats_data_id,
-                "lang":        "J",
-            },
-            timeout=30
-        )
-        meta_response.raise_for_status()
-
-        # 総件数を取得する（1件だけ取得してRESULT_INFを確認する）
-        count_response = await client.get(
-            "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-            params={
-                "appId":         app_id,
-                "statsDataId":   stats_data_id,
-                "lang":          "J",
-                "limit":         1,
-                "startPosition": 1,
-            },
-            timeout=30
-        )
-        count_response.raise_for_status()
-
-    # メタ情報を整形する
-    class_info = meta_response.json()["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
-
-    if isinstance(class_info, dict):
-        class_info = [class_info]
-
-    parameters = []
-    for obj in class_info:
-        classes = obj.get("CLASS", [])
-        if isinstance(classes, dict):
-            classes = [classes]
-
-        parameters.append({
-            "parameter": f"cd{obj['@id'].capitalize()}",
-            "name":      obj["@name"],
-            "count":     len(classes),
-            "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
-        })
-
-    # 総件数を取得する
-    total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
-
+@app.get("/stats/{collection_name}")
+def get_collection(collection_name: str):
+    # GCSに保存されたParquetファイルをDuckDBで読み込んで返す
+    data = get_stats(collection_name)
     return {
-        "stats_data_id": stats_data_id,
-        "total_number":  f"{total:,} 件",
-        "parameters":    parameters
+        "collection": collection_name,
+        "updated_at": str(datetime.now()),
+        "count":      len(data),
+        "data":       data
     }
 
-# class_infoからコード→名称の変換辞書を作成する
-def build_code_to_name_map(class_info: list) -> dict:
-    code_map = {}
 
-    for class_obj in class_info:
-        class_id   = class_obj["@id"]
-        class_name = class_obj["@name"]
-        classes    = class_obj.get("CLASS", [])
-
-        if isinstance(classes, dict):
-            classes = [classes]
-
-        code_map[class_id] = {
-            "label": class_name,
-            "codes": {c["@code"]: c["@name"] for c in classes}
-        }
-
-    return code_map
-
-# 1行分のデータのコードを名称に変換する
-def convert_row(row: dict, code_map: dict) -> dict:
-    converted = {}
-
-    for key, value in row.items():
-        if key == "$":
-            try:
-                converted["値"] = float(value) if "." in str(value) else int(value)
-            except (ValueError, TypeError):
-                converted["値"] = value
-
-        elif key.startswith("@"):
-            field_id = key[1:]
-
-            if field_id in code_map:
-                col_name = code_map[field_id]["label"]
-                codes    = code_map[field_id]["codes"]
-                converted[col_name] = codes.get(value, value)
-            else:
-                converted[field_id] = value
-
-    return converted
-
-# e-Stat APIをページネーションで全件取得しコードを名称に変換して返す
-# 例: /estat/pass/0003427113?cdArea=00000,13A01,20A01
-@app.get("/estat/pass/{stats_data_id}")
-async def estat_pass(stats_data_id: str, request: Request):
-    app_id         = os.environ["ESTAT_APP_ID"]
-    all_values     = []
-    start_position = 1
-    class_info     = None
-    total_number   = 0
-
-    params = {
-        "appId":       app_id,
-        "statsDataId": stats_data_id,
-        "lang":        "J",
-        "limit":       ESTAT_LIMIT,
-    }
-    params.update(dict(request.query_params))
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        while True:
-            params["startPosition"] = start_position
-
-            response = await client.get(
-                "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-                params=params,
-            )
-            response.raise_for_status()
-            raw_json         = response.json()
-            statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
-            result_inf       = statistical_data["RESULT_INF"]
-            total_number     = int(result_inf["TOTAL_NUMBER"])
-            to_number        = int(result_inf["TO_NUMBER"])
-
-            if class_info is None:
-                class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
-                if isinstance(class_info, dict):
-                    class_info = [class_info]
-
-            all_values.extend(statistical_data["DATA_INF"]["VALUE"])
-
-            if to_number >= total_number:
-                break
-            start_position = to_number + 1
-
-    code_map       = build_code_to_name_map(class_info)
-    converted_data = [convert_row(row, code_map) for row in all_values]
-
-    return {
-        "stats_data_id": stats_data_id,
-        "fetched_at":    str(datetime.now()),
-        "total_number":  total_number,
-        "count":         len(converted_data),
-        "data":          converted_data
-    }
-
-# データ収集を手動トリガーする
 @app.post("/collect")
 async def trigger_collection(background_tasks: BackgroundTasks):
+    # データ収集をバックグラウンドでトリガーする（Cloud Schedulerから呼ばれる）
     background_tasks.add_task(run_all_collections)
     return {"message": "収集を開始しました", "timestamp": str(datetime.now())}
