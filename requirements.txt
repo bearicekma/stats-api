@@ -7,3 +7,4 @@ pandas
 pyarrow
 beautifulsoup4
 mcp[cli]          # ← 追加: FastMCPを含むMCP Python SDK
+anthropic
