@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings  # 追加
 
 # --- 定数 ---
 # 自分自身のベースURL（Cloud Run環境変数から取得、ローカルはlocalhost）
@@ -12,7 +13,14 @@ BASE_URL = os.getenv("STATS_API_BASE_URL", "http://localhost:8080")
 HTTP_TIMEOUT = 30.0
 
 # FastMCPサーバー初期化
-mcp = FastMCP("stats_api_mcp", stateless_http=True)
+# Cloud Run等の外部ホスト経由のアクセスを許可するため保護を無効化する
+mcp = FastMCP(
+    "stats_api_mcp",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+)
 
 
 # --- 共通HTTPクライアント ---
