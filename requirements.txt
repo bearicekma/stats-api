@@ -1,4 +1,3 @@
-
 fastapi
 hypercorn
 httpx
@@ -6,6 +5,5 @@ google-cloud-storage
 duckdb
 pandas
 pyarrow
-anthropic
-pdfplumber
 beautifulsoup4
+mcp[cli]          # ← 追加: FastMCPを含むMCP Python SDK
