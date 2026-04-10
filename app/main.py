@@ -5,8 +5,14 @@ from app.database   import get_stats
 from app.collector  import run_all_collections
 from app.routers    import estat, boj
 from app.mcp_server import mcp
+import contextlib
 
-app = FastAPI(title="Stats API")
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp.session_manager.run():
+        yield
+
+app = FastAPI(title="Stats API", lifespan=lifespan)
 
 # ルーターを登録する
 app.include_router(estat.router)
@@ -14,7 +20,7 @@ app.include_router(boj.router)
 
 # MCPサーバーをStreamable HTTPでマウントする
 # 接続URL: https://stats-api-491107.web.app/mcp
-app.mount("/mcp", mcp.streamable_http_app())
+app.mount("/", mcp.streamable_http_app())
 
 
 @app.get("/")

@@ -12,7 +12,7 @@ BASE_URL = os.getenv("STATS_API_BASE_URL", "http://localhost:8080")
 HTTP_TIMEOUT = 30.0
 
 # FastMCPサーバー初期化
-mcp = FastMCP("stats_api_mcp")
+mcp = FastMCP("stats_api_mcp", stateless_http=True)
 
 
 # --- 共通HTTPクライアント ---
