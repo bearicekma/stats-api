@@ -17,6 +17,7 @@ HTTP_TIMEOUT = 30.0
 mcp = FastMCP(
     "stats_api_mcp",
     stateless_http=True,
+    json_response=True,  # 追加: SSEではなくJSONで返す
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False
     )
