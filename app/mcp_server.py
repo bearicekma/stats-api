@@ -13,11 +13,9 @@ BASE_URL = os.getenv("STATS_API_BASE_URL", "http://localhost:8080")
 HTTP_TIMEOUT = 30.0
 
 # FastMCPサーバー初期化
-# Cloud Run等の外部ホスト経由のアクセスを許可するため保護を無効化する
+# streamable_httpではなくSSEトランスポートを使う
 mcp = FastMCP(
     "stats_api_mcp",
-    stateless_http=True,
-    json_response=True,  # 追加: SSEではなくJSONで返す
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False
     )
