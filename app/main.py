@@ -1,5 +1,3 @@
-
-import contextlib
 from fastapi       import FastAPI, BackgroundTasks
 from datetime      import datetime
 from app.database  import get_stats
@@ -7,14 +5,7 @@ from app.collector import run_all_collections
 from app.routers   import estat, boj
 from app.mcp_server import mcp
 
-
-@contextlib.asynccontextmanager
-async def lifespan(app: FastAPI):
-    async with mcp.session_manager.run():
-        yield
-
-
-app = FastAPI(title="Stats API", lifespan=lifespan)
+app = FastAPI(title="Stats API")
 
 app.include_router(estat.router)
 app.include_router(boj.router)
