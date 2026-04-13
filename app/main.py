@@ -5,14 +5,14 @@ from fastapi       import FastAPI, BackgroundTasks
 from datetime      import datetime
 from app.database  import get_stats
 from app.collector import run_all_collections
-from app.routers   import estat, boj, ndl
+from app.routers   import estat, boj, eia, ndl
 
 app = FastAPI(title="Stats API")
 
 # ルーターを登録する
 app.include_router(estat.router)
 app.include_router(boj.router)
-# app.include_router(eia.router)
+app.include_router(eia.router)
 app.include_router(ndl.router)
 
 
