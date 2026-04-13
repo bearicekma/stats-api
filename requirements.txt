@@ -1,8 +1,12 @@
+%%writefile requirements.txt
 fastapi
 hypercorn
 httpx
-google-cloud-firestore
-anthropic
-pdfplumber
+google-cloud-storage
+duckdb
+pandas
+pyarrow
 beautifulsoup4
+mcp[cli]
+anthropic
 xmltodict
