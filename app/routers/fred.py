@@ -2,6 +2,7 @@
 # /fred/pass   : 系列データ取得（時系列の数値）
 # /fred/meta   : 系列のメタ情報（名称・単位・期間など）
 # /fred/search : キーワードで系列を検索
+# aaa
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import JSONResponse
