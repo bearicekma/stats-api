@@ -5,7 +5,7 @@ from fastapi       import FastAPI, BackgroundTasks
 from datetime      import datetime
 from app.database  import get_stats
 from app.collector import run_all_collections
-from app.routers   import estat, boj, eia, ndl, fred
+from app.routers   import estat, boj, eia, ndl, fred, d_kanko
 
 app = FastAPI(title="Stats API")
 
@@ -15,6 +15,7 @@ app.include_router(boj.router)
 app.include_router(eia.router)
 app.include_router(ndl.router)
 app.include_router(fred.router)
+app.include_router(d_kanko.router)
 
 
 @app.get("/")
