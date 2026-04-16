@@ -1,5 +1,5 @@
 # デジタル観光統計オープンデータエンドポイント
-# /d_kanko : 観光来訪者数データの取得（期間・都道府県・市区町村で絞り込み可）
+# /stats/d_kanko : 観光来訪者数データの取得（期間・都道府県・市区町村で絞り込み可）
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ import duckdb
 import tempfile
 import os
 
-router = APIRouter(prefix="/d_kanko", tags=["d_kanko"])
+router = APIRouter(prefix="/stats/d_kanko", tags=["d_kanko"])
 
 BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 GCS_PATH    = "d_kanko/d_kanko.parquet"
@@ -44,9 +44,9 @@ async def get_d_kanko(request: Request):
     #   pref : 都道府県名（部分一致）
     #   city : 市区町村名（部分一致）※type=cityのみ有効
     #
-    # 例: /d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref
-    # 例: /d_kanko?city=松本&type=city
-    # 例: /d_kanko?pref=長野&type=city&from=2024-01&to=2024-12
+    # 例: /stats/d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref
+    # 例: /stats/d_kanko?city=松本&type=city
+    # 例: /stats/d_kanko?pref=長野&type=city&from=2024-01&to=2024-12
 
     params = dict(request.query_params)
     type_  = params.get("type", None)
@@ -60,16 +60,12 @@ async def get_d_kanko(request: Request):
 
     if type_ in ("pref", "city"):
         conditions.append(f"区分 = '{type_}'")
-
     if from_:
         conditions.append(f"date >= DATE '{from_}'")
-
     if to_:
         conditions.append(f"date <= DATE '{to_}'")
-
     if pref:
         conditions.append(f"都道府県名 LIKE '%{pref}%'")
-
     if city and type_ == "city":
         conditions.append(f"地域名称 LIKE '%{city}%'")
 
@@ -89,17 +85,10 @@ async def get_d_kanko(request: Request):
         """
         result = duckdb.query(sql).df()
         data   = result.to_dict(orient="records")
-
-        return {
-            "count": len(data),
-            "data":  data,
-        }
+        return {"count": len(data), "data": data}
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
     finally:
         if tmp_path and os.path.exists(tmp_path):

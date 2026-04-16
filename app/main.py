@@ -9,13 +9,15 @@ from app.routers   import estat, boj, eia, ndl, fred, d_kanko
 
 app = FastAPI(title="Stats API")
 
-# ルーターを登録する
+# 個別ルーターを先に登録する（/stats/{collection_name}との競合を回避）
+app.include_router(d_kanko.router)
+
+# 各データソースのルーターを登録する
 app.include_router(estat.router)
 app.include_router(boj.router)
 app.include_router(eia.router)
 app.include_router(ndl.router)
 app.include_router(fred.router)
-app.include_router(d_kanko.router)
 
 
 @app.get("/")

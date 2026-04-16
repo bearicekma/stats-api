@@ -29,28 +29,40 @@ def _fetch_csv(url: str) -> pd.DataFrame | None:
 
 def _normalize_pref(df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
     # 都道府県CSVを統合テーブル形式に変換する
-    result                  = pd.DataFrame()
+    # dfをベースに列を追加・変換することでインデックスを正しく引き継ぐ
+    result = df.copy()
     result["date"]          = pd.to_datetime(f"{year}-{month:02d}-01")
     result["区分"]          = "pref"
     result["都道府県コード"] = df["地域コード"].astype(str).str.zfill(2)
-    result["都道府県名"]     = df["地域名称"].values
-    result["地域コード"]     = df["地域コード"].astype(str).str.zfill(2)
-    result["地域名称"]       = df["地域名称"].values
-    result["人数"]           = df["人数"].astype(int).values
-    return result
+    result["都道府県名"]     = df["地域名称"]
+    # 都道府県の地域コードは5桁ゼロ埋めに統一する（例: "20" → "20000"）
+    result["地域コード"]     = df["地域コード"].astype(str).str.zfill(2) + "000"
+    result["地域名称"]       = df["地域名称"]
+    result["人数"]           = df["人数"].astype(int)
+
+    return result[[
+        "date", "区分", "都道府県コード", "都道府県名",
+        "地域コード", "地域名称", "人数"
+    ]].reset_index(drop=True)
 
 
 def _normalize_city(df: pd.DataFrame, year: int, month: int) -> pd.DataFrame:
     # 市区町村CSVを統合テーブル形式に変換する
-    result                  = pd.DataFrame()
+    # dfをベースに列を追加・変換することでインデックスを正しく引き継ぐ
+    result = df.copy()
     result["date"]          = pd.to_datetime(f"{year}-{month:02d}-01")
     result["区分"]          = "city"
     result["都道府県コード"] = df["都道府県コード"].astype(str).str.zfill(2)
-    result["都道府県名"]     = df["都道府県名"].values
+    result["都道府県名"]     = df["都道府県名"]
+    # 市区町村の地域コードは5桁ゼロ埋め
     result["地域コード"]     = df["地域コード"].astype(str).str.zfill(5)
-    result["地域名称"]       = df["地域名称"].values
-    result["人数"]           = df["人数"].astype(int).values
-    return result
+    result["地域名称"]       = df["地域名称"]
+    result["人数"]           = df["人数"].astype(int)
+
+    return result[[
+        "date", "区分", "都道府県コード", "都道府県名",
+        "地域コード", "地域名称", "人数"
+    ]].reset_index(drop=True)
 
 
 def _fetch_year(year: int) -> pd.DataFrame:
