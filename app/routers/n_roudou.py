@@ -5,6 +5,7 @@ from fastapi           import APIRouter, Request
 from fastapi.responses import JSONResponse
 from google.cloud      import storage
 import duckdb
+import math
 import os
 import tempfile
 
@@ -33,6 +34,22 @@ def _normalize_date(value: str) -> str | None:
     if len(parts) >= 2:
         return f"{parts[0]}-{parts[1].zfill(2)}-01"
     return None
+
+
+def _clean_value(v):
+    # float型のNaN・inf・-infをNoneに変換する（JSONシリアライズ対策）
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    return v
+
+
+def _df_to_records(df) -> list[dict]:
+    # DataFrameを辞書リストに変換し、NaN/infをNoneに変換する
+    records = df.to_dict(orient="records")
+    return [
+        {k: _clean_value(v) for k, v in record.items()}
+        for record in records
+    ]
 
 
 @router.get("/juri_sangyo")
@@ -78,9 +95,7 @@ async def get_juri_sangyo(request: Request):
             ORDER BY DATE, 産業コード
         """
         df = duckdb.query(sql).to_df()
-        # NaNをNoneに変換してJSON化可能にする
-        df = df.where(df.notnull(), None)
-        records = df.to_dict(orient="records")
+        records = _df_to_records(df)
 
         return {
             "count": len(records),
