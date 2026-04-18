@@ -7,6 +7,7 @@ from google.cloud      import storage
 import duckdb
 import math
 import os
+import pandas as pd
 import tempfile
 
 
@@ -43,8 +44,16 @@ def _clean_value(v):
     return v
 
 
-def _df_to_records(df) -> list[dict]:
-    # DataFrameを辞書リストに変換し、NaN/infをNoneに変換する
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    # DataFrameを辞書リストに変換する
+    # datetime型の列はYYYY-MM-DD形式の文字列に変換する
+    # NaN/infをNoneに変換する（JSONシリアライズ対策）
+
+    # datetime型の列を文字列化する（DATEと公表日が対象）
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime("%Y-%m-%d").where(df[col].notnull(), None)
+
     records = df.to_dict(orient="records")
     return [
         {k: _clean_value(v) for k, v in record.items()}
