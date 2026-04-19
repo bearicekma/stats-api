@@ -1,122 +1,49 @@
-# 長野労働局APIエンドポイント
-# /n_roudou/juri_sangyo : 受理地別・産業別新規求人数（大分類）
+# 長野労働局 新規求人数エンドポイント
 
-from fastapi           import APIRouter, Request
+from fastapi           import APIRouter
 from fastapi.responses import JSONResponse
-from google.cloud      import storage
-import duckdb
+from app.database      import get_stats
+from datetime          import datetime
 import math
-import os
-import pandas as pd
-import tempfile
+
+router = APIRouter(prefix="/n_roudou", tags=["長野労働局"])
 
 
-router = APIRouter(prefix="/n_roudou", tags=["n_roudou"])
+@router.get(
+    "/juri_sangyo",
+    summary="受理地別・産業別 新規求人数",
+)
+def n_roudou_juri_sangyo():
+    """
+    長野労働局の月次PDFから抽出した、産業大分類別の新規求人数。
 
-BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
-GCS_PATH    = "n_roudou/juri_sangyo/data.parquet"
+    **産業コード一覧:**
+    - `all` 合計
+    - `D` 建設業 / `E` 製造業 / `G` 情報通信業
+    - `H` 運輸・郵便業 / `I` 卸売・小売業 / `J` 金融・保険業
+    - `K` 不動産業 / `M` 宿泊・飲食サービス / `N` 生活関連サービス
+    - `O` 教育・学習支援 / `P` 医療・福祉 / `R` サービス業
+    - `other` その他
 
+    **主なレスポンスフィールド:**
+    - `DATE` 年月（YYYY-MM-DD形式）
+    - `産業コード` / `産業分類`
+    - `新規求人数` / `前月比` / `前年同月比`
+    - `うちパート` / `うちパート前月比` / `うちパート前年同月比`
+    """
+    # GCSからParquetを読み込んで返す
+    raw = get_stats("juri_sangyo", category="n_roudou")
 
-def _download_parquet() -> str:
-    # GCSからParquetを一時ファイルにダウンロードしてパスを返す
-    gcs    = storage.Client()
-    bucket = gcs.bucket(BUCKET_NAME)
-    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-        tmp_path = tmp.name
-    bucket.blob(GCS_PATH).download_to_filename(tmp_path)
-    return tmp_path
+    def clean(v):
+        # NaN・inf はJSONシリアライズできないためNoneに変換する
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return v
 
-
-def _normalize_date(value: str) -> str | None:
-    # YYYY-MM または YYYY-MM-DD を YYYY-MM-01 形式に正規化する
-    if not value:
-        return None
-    parts = value.split("-")
-    if len(parts) >= 2:
-        return f"{parts[0]}-{parts[1].zfill(2)}-01"
-    return None
-
-
-def _clean_value(v):
-    # float型のNaN・inf・-infをNoneに変換する（JSONシリアライズ対策）
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return None
-    return v
-
-
-def _df_to_records(df: pd.DataFrame) -> list[dict]:
-    # DataFrameを辞書リストに変換する
-    # datetime型の列はYYYY-MM-DD形式の文字列に変換する
-    # NaN/infをNoneに変換する（JSONシリアライズ対策）
-
-    # datetime型の列を文字列化する（DATEと公表日が対象）
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            df[col] = df[col].dt.strftime("%Y-%m-%d").where(df[col].notnull(), None)
-
-    records = df.to_dict(orient="records")
-    return [
-        {k: _clean_value(v) for k, v in record.items()}
-        for record in records
-    ]
-
-
-@router.get("/juri_sangyo")
-async def get_juri_sangyo(request: Request):
-    # 受理地別・産業別新規求人数を取得する
-    # パラメータ:
-    #   date : 対象年月（YYYY-MM または YYYY-MM-DD、単月指定）
-    #   from : 開始年月（YYYY-MM）
-    #   to   : 終了年月（YYYY-MM）
-    #   code : 産業コード（all / D / E / G / H / I / J / K / M / N / O / P / R / other）
-    #
-    # 例: /n_roudou/juri_sangyo?date=2026-02
-    # 例: /n_roudou/juri_sangyo?from=2025-04&to=2026-02&code=D
-    # 例: /n_roudou/juri_sangyo?code=all
-
-    params = dict(request.query_params)
-    date_  = _normalize_date(params.get("date", ""))
-    from_  = _normalize_date(params.get("from", ""))
-    to_    = _normalize_date(params.get("to",   ""))
-    code   = params.get("code", None)
-
-    # WHERE句を組み立てる
-    conditions = []
-    if date_:
-        conditions.append(f"DATE = DATE '{date_}'")
-    if from_:
-        conditions.append(f"DATE >= DATE '{from_}'")
-    if to_:
-        conditions.append(f"DATE <= DATE '{to_}'")
-    if code:
-        # シングルクォート対策として置換する
-        safe_code = code.replace("'", "''")
-        conditions.append(f"産業コード = '{safe_code}'")
-
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-    tmp_path = None
-    try:
-        tmp_path = _download_parquet()
-        sql = f"""
-            SELECT * FROM read_parquet('{tmp_path}')
-            {where}
-            ORDER BY DATE, 産業コード
-        """
-        df = duckdb.query(sql).to_df()
-        records = _df_to_records(df)
-
-        return {
-            "count": len(records),
-            "data":  records,
-        }
-
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"クエリ失敗: {type(e).__name__}: {str(e)}"}
-        )
-
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    data = [{k: clean(v) for k, v in row.items()} for row in raw]
+    return {
+        "collection": "juri_sangyo",
+        "updated_at": str(datetime.now()),
+        "count":      len(data),
+        "data":       data,
+    }
