@@ -2,7 +2,8 @@
 # ルーターの登録と共通エンドポイントのみを記載する
 
 from fastapi           import FastAPI, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from pathlib           import Path
 from datetime          import datetime
 from app.database      import get_stats
 from app.collector     import (
@@ -25,6 +26,9 @@ app.include_router(ndl.router)
 app.include_router(fred.router)
 app.include_router(n_roudou.router)
 
+# ガイドHTMLのパス（このファイルと同階層の templates/guide.html）
+GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
+
 
 # ── /collect エンドポイントの target 分岐 ─────────────────
 
@@ -39,6 +43,12 @@ COLLECTION_TARGETS = {
 def root():
     # 死活確認エンドポイント
     return {"status": "ok", "timestamp": str(datetime.now())}
+
+
+@app.get("/guide", response_class=HTMLResponse)
+def guide():
+    # 利用者向けAPIガイドページを返す（app/templates/guide.html）
+    return HTMLResponse(GUIDE_HTML.read_text(encoding="utf-8"))
 
 
 @app.get("/master/{collection_name}")
@@ -68,22 +78,15 @@ def get_collection(collection_name: str):
 @app.post("/collect")
 async def trigger_collection(background_tasks: BackgroundTasks, target: str = None):
     # データ収集をバックグラウンドでトリガーする（Cloud Schedulerから呼ばれる）
-    # target未指定: 全データソースを順次実行（手動実行・デバッグ用）
+    # target未指定: 全データソースを順次実行
     # target指定 : 該当データソースのみ実行
-    #
-    # 例: /collect                  → 全件実行
-    # 例: /collect?target=d_kanko   → d_kankoのみ
-    # 例: /collect?target=n_roudou  → n_roudouのみ
-
     if target is None:
-        # targetなし: 全データソースを実行する
         background_tasks.add_task(run_all_collections)
         return {
             "message":   "全データソースの収集を開始しました",
             "timestamp": str(datetime.now())
         }
 
-    # target指定: 対応する関数を呼び出す
     func = COLLECTION_TARGETS.get(target)
     if func is None:
         return JSONResponse(
