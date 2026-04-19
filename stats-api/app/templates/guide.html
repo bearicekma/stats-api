@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stats API ガイド</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body  { font-family: 'Noto Sans JP', sans-serif; }
+    pre, code { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
+    html  { scroll-behavior: smooth; }
+    .scroll-mt { scroll-margin-top: 1.5rem; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<!-- ヘッダー -->
+<header class="bg-indigo-700 text-white py-5 px-8 shadow-lg">
+  <div class="max-w-7xl mx-auto">
+    <h1 class="text-2xl font-bold tracking-tight">📊 Stats API ガイド</h1>
+    <p class="text-indigo-200 mt-1 text-sm">政府統計・金融データAPIの利用ガイド — Power Query 向け</p>
+  </div>
+</header>
+
+<div class="max-w-7xl mx-auto flex gap-8 p-6">
+
+  <!-- サイドバー（目次） -->
+  <nav class="w-52 shrink-0">
+    <div class="sticky top-6 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">目次</p>
+      <ul class="space-y-0.5 text-sm">
+        <li><a href="#intro"        class="block px-2 py-1.5 rounded hover:bg-slate-100 text-slate-700">はじめに</a></li>
+        <li><a href="#power-query"  class="block px-2 py-1.5 rounded hover:bg-slate-100 text-slate-700">Power Query 基本パターン</a></li>
+        <li class="pt-2 border-t border-slate-100 mt-2">
+          <p class="text-xs text-slate-400 px-2 py-1 font-medium">データソース</p>
+        </li>
+        <li><a href="#kanko"  class="block px-2 py-1.5 rounded hover:bg-emerald-50 text-emerald-700">🏔 観光・労働</a></li>
+        <li><a href="#estat"  class="block px-2 py-1.5 rounded hover:bg-blue-50   text-blue-700">🏛 政府統計 e-Stat</a></li>
+        <li><a href="#boj"    class="block px-2 py-1.5 rounded hover:bg-rose-50   text-rose-700">🏦 日本銀行</a></li>
+        <li><a href="#eia"    class="block px-2 py-1.5 rounded hover:bg-orange-50 text-orange-700">⚡ EIA エネルギー</a></li>
+        <li><a href="#fred"   class="block px-2 py-1.5 rounded hover:bg-purple-50 text-purple-700">🇺🇸 FRED 米連邦準備</a></li>
+        <li><a href="#ndl"    class="block px-2 py-1.5 rounded hover:bg-teal-50   text-teal-700">📚 国会図書館</a></li>
+        <li><a href="#master" class="block px-2 py-1.5 rounded hover:bg-slate-100 text-slate-700">🗂 マスタ・汎用</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- メインコンテンツ -->
+  <main class="flex-1 min-w-0 space-y-10">
+
+    <!-- はじめに -->
+    <section id="intro" class="scroll-mt bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+      <h2 class="text-xl font-bold mb-4">はじめに</h2>
+      <div class="grid grid-cols-2 gap-4 mb-5">
+        <div class="bg-indigo-50 rounded-lg p-4">
+          <p class="text-xs text-indigo-500 font-semibold uppercase tracking-wide mb-1">ベースURL</p>
+          <code class="text-indigo-700 text-sm">https://stats-api-491107.web.app</code>
+        </div>
+        <div class="bg-slate-50 rounded-lg p-4">
+          <p class="text-xs text-slate-500 font-semibold uppercase tracking-wide mb-1">形式 / 認証</p>
+          <code class="text-slate-700 text-sm">JSON（UTF-8）/ 認証不要</code>
+        </div>
+      </div>
+      <p class="text-sm text-slate-600 leading-relaxed">
+        政府統計・金融データを一元的に取得できる中継APIです。
+        Power Queryから <code class="bg-slate-100 px-1.5 py-0.5 rounded">Web.Contents()</code> で直接呼び出すことができます。
+        パススルー系エンドポイントは各機関のAPIに中継し、ストレージ系（<code class="bg-slate-100 px-1.5 py-0.5 rounded">/stats/</code>）は
+        GCSに蓄積済みのデータを高速返却します。
+      </p>
+    </section>
+
+    <!-- Power Query 基本パターン -->
+    <section id="power-query" class="scroll-mt bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+      <h2 class="text-xl font-bold mb-4">Power Query 基本パターン</h2>
+
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">① シンプルなGET（パラメータなし）</h3>
+      <pre class="bg-slate-900 text-slate-100 rounded-lg p-4 overflow-x-auto mb-5">let
+    url      = "https://stats-api-491107.web.app/stats/d_kanko",
+    source   = Json.Document(Web.Contents(url)),
+    records  = source[data],
+    table    = Table.FromList(records, Splitter.SplitByNothing()),
+    expanded = Table.ExpandRecordColumn(table, "Column1",
+                 {"date", "都道府県名", "地域名称", "人数"})
+in
+    expanded</pre>
+
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">② クエリパラメータを付ける場合</h3>
+      <pre class="bg-slate-900 text-slate-100 rounded-lg p-4 overflow-x-auto mb-5">let
+    base   = "https://stats-api-491107.web.app",
+    path   = "/boj/pass",
+    query  = "?db=FM08&code=FXERD04&startDate=202401",
+    source = Json.Document(Web.Contents(base & path & query))
+in
+    source</pre>
+
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">③ レスポンス共通構造</h3>
+      <pre class="bg-slate-900 text-slate-100 rounded-lg p-4 overflow-x-auto">{
+    "collection": "d_kanko",
+    "count": 1234,
+    "data": [ { ... }, { ... } ]   // ← この配列を Table.FromList に渡す
+}</pre>
+    </section>
+
+    <!-- ========================================
+         観光・労働統計
+    ======================================== -->
+    <section id="kanko" class="scroll-mt">
+      <div class="flex items-center gap-2 mb-4">
+        <h2 class="text-xl font-bold text-emerald-700">🏔 観光・労働統計</h2>
+        <span class="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium">長野県データ</span>
+      </div>
+
+      <!-- d_kanko -->
+      <div class="bg-white rounded-xl shadow-sm border border-emerald-100 p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-emerald-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-emerald-700 font-semibold text-sm">/stats/d_kanko</code>
+          <span class="text-sm text-slate-500">観光入込客数（都道府県・市区町村別 月次）</span>
+        </div>
+        <p class="text-sm text-slate-600 mb-4">観光庁の月次データをGCSに蓄積済み。都道府県コード・地域コード付き。</p>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">レスポンスフィールド</h4>
+        <table class="text-xs w-full mb-4">
+          <thead class="bg-slate-50"><tr>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">フィールド</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">内容</th>
+          </tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-3 py-2 font-mono">date</td><td class="px-3 py-2 text-slate-600">年月（YYYY-MM-DD）</td></tr>
+            <tr><td class="px-3 py-2 font-mono">区分</td><td class="px-3 py-2 text-slate-600">pref（都道府県）/ city（市区町村）</td></tr>
+            <tr><td class="px-3 py-2 font-mono">都道府県コード</td><td class="px-3 py-2 text-slate-600">2桁文字列</td></tr>
+            <tr><td class="px-3 py-2 font-mono">地域コード</td><td class="px-3 py-2 text-slate-600">5桁文字列</td></tr>
+            <tr><td class="px-3 py-2 font-mono">地域名称</td><td class="px-3 py-2 text-slate-600">都道府県名または市区町村名</td></tr>
+            <tr><td class="px-3 py-2 font-mono">人数</td><td class="px-3 py-2 text-slate-600">観光入込客数（千人）</td></tr>
+          </tbody>
+        </table>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Power Query 例</h4>
+        <pre class="bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">let
+    source   = Json.Document(Web.Contents("https://stats-api-491107.web.app/stats/d_kanko")),
+    records  = source[data],
+    table    = Table.FromList(records, Splitter.SplitByNothing()),
+    expanded = Table.ExpandRecordColumn(table, "Column1",
+                 {"date", "区分", "都道府県コード", "都道府県名", "地域コード", "地域名称", "人数"}),
+    typed    = Table.TransformColumnTypes(expanded,
+                 {{"date", type date}, {"人数", Int64.Type}})
+in
+    typed</pre>
+      </div>
+
+      <!-- n_roudou -->
+      <div class="bg-white rounded-xl shadow-sm border border-emerald-100 p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-emerald-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-emerald-700 font-semibold text-sm">/n_roudou/juri_sangyo</code>
+          <span class="text-sm text-slate-500">長野労働局 受理地別産業別新規求人数（月次）</span>
+        </div>
+        <p class="text-sm text-slate-600 mb-4">長野労働局の月次PDFから抽出した産業大分類別の新規求人数。全数・うちパートを収録。</p>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">産業コード一覧</h4>
+        <div class="grid grid-cols-4 gap-1 text-xs mb-4 bg-slate-50 rounded p-3">
+          <div><code class="text-emerald-700">all</code> 合計</div>
+          <div><code class="text-emerald-700">D</code> 建設業</div>
+          <div><code class="text-emerald-700">E</code> 製造業</div>
+          <div><code class="text-emerald-700">G</code> 情報通信業</div>
+          <div><code class="text-emerald-700">H</code> 運輸・郵便</div>
+          <div><code class="text-emerald-700">I</code> 卸売・小売</div>
+          <div><code class="text-emerald-700">J</code> 金融・保険</div>
+          <div><code class="text-emerald-700">K</code> 不動産</div>
+          <div><code class="text-emerald-700">M</code> 宿泊・飲食</div>
+          <div><code class="text-emerald-700">N</code> 生活関連サービス</div>
+          <div><code class="text-emerald-700">O</code> 教育・学習</div>
+          <div><code class="text-emerald-700">P</code> 医療・福祉</div>
+          <div><code class="text-emerald-700">R</code> サービス業</div>
+          <div><code class="text-emerald-700">other</code> その他</div>
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Power Query 例（合計行のみ）</h4>
+        <pre class="bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">let
+    source   = Json.Document(Web.Contents("https://stats-api-491107.web.app/n_roudou/juri_sangyo")),
+    records  = source[data],
+    table    = Table.FromList(records, Splitter.SplitByNothing()),
+    expanded = Table.ExpandRecordColumn(table, "Column1",
+                 {"DATE", "産業コード", "産業分類", "新規求人数", "前月比", "前年同月比",
+                  "うちパート", "うちパート前月比", "うちパート前年同月比"}),
+    // 産業コード = "all" で合計行のみ絞り込む
+    filtered = Table.SelectRows(expanded, each [産業コード] = "all"),
+    typed    = Table.TransformColumnTypes(filtered,
+                 {{"DATE", type date}, {"新規求人数", Int64.Type}})
+in
+    typed</pre>
+      </div>
+    </section>
+
+    <!-- ========================================
+         e-Stat
+    ======================================== -->
+    <section id="estat" class="scroll-mt">
+      <h2 class="text-xl font-bold text-blue-700 mb-4">🏛 政府統計 e-Stat</h2>
+
+      <!-- estat/meta -->
+      <div class="bg-white rounded-xl shadow-sm border border-blue-100 p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-blue-700 font-semibold text-sm">/estat/meta/{stats_data_id}</code>
+          <span class="text-sm text-slate-500">統計表のメタ情報と総件数</span>
+        </div>
+        <div class="bg-blue-50 rounded-lg p-3 text-xs text-blue-800 mb-4">
+          💡 <strong>使い方：</strong> まずメタ情報で列名・分類コード・総件数を確認してから、<code>/estat/pass</code> でデータを取得するのがおすすめです。
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">URL例</h4>
+        <code class="block bg-slate-50 px-3 py-2 rounded text-xs text-slate-700 mb-4">/estat/meta/0003348356</code>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Power Query 例</h4>
+        <pre class="bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">let
+    id     = "0003348356",   // ← e-Stat の統計表ID
+    source = Json.Document(Web.Contents("https://stats-api-491107.web.app/estat/meta/" & id))
+in
+    source</pre>
+      </div>
+
+      <!-- estat/pass -->
+      <div class="bg-white rounded-xl shadow-sm border border-blue-100 p-6">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-blue-700 font-semibold text-sm">/estat/pass/{stats_data_id}</code>
+          <span class="text-sm text-slate-500">統計データのパススルー取得</span>
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">主なパラメータ</h4>
+        <table class="text-xs w-full mb-4">
+          <thead class="bg-slate-50"><tr>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">パラメータ</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">必須</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">説明</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">例</th>
+          </tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-3 py-2 font-mono">cdTimeFrom</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">開始年度コード</td><td class="px-3 py-2 font-mono">2022000000</td></tr>
+            <tr><td class="px-3 py-2 font-mono">cdTimeTo</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">終了年度コード</td><td class="px-3 py-2 font-mono">2022999999</td></tr>
+            <tr><td class="px-3 py-2 font-mono">cdCat01</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">分類1コード（メタ情報で確認）</td><td class="px-3 py-2 font-mono">00100</td></tr>
+          </tbody>
+        </table>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">URL例</h4>
+        <code class="block bg-slate-50 px-3 py-2 rounded text-xs text-slate-700 mb-4">/estat/pass/0003348356?cdTimeFrom=2022000000&cdTimeTo=2022999999</code>
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+          ⚠️ <strong>大規模データの注意：</strong> 消費者物価指数などは件数が多く、1年単位で
+          <code>cdTimeFrom/cdTimeTo</code> を絞って複数クエリに分けるのが安定します。Power Queryで年ごとのクエリを作成し、<code>Table.Combine</code> で結合してください。
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================
+         日本銀行
+    ======================================== -->
+    <section id="boj" class="scroll-mt">
+      <h2 class="text-xl font-bold text-rose-700 mb-1">🏦 日本銀行 時系列統計</h2>
+      <p class="text-sm text-slate-600 mb-4">日本銀行の時系列統計データ検索サイトAPIへのパススルーです。金融市場・物価・資金循環など幅広いデータを取得できます。</p>
+
+      <!-- boj/pass -->
+      <div class="bg-white rounded-xl shadow-sm border border-rose-100 p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-rose-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-rose-700 font-semibold text-sm">/boj/pass</code>
+          <span class="text-sm text-slate-500">コードAPI — 系列コードで時系列データを取得</span>
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">パラメータ</h4>
+        <table class="text-xs w-full mb-4">
+          <thead class="bg-slate-50"><tr>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">パラメータ</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">必須</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">説明</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">例</th>
+          </tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-3 py-2 font-mono">db</td><td class="px-3 py-2 text-red-500 font-semibold">必須</td><td class="px-3 py-2 text-slate-600">DB名（下表参照）</td><td class="px-3 py-2 font-mono">FM08</td></tr>
+            <tr><td class="px-3 py-2 font-mono">code</td><td class="px-3 py-2 text-red-500 font-semibold">必須</td><td class="px-3 py-2 text-slate-600">系列コード（カンマ区切りで複数可、同一期種のみ）</td><td class="px-3 py-2 font-mono">FXERD04</td></tr>
+            <tr><td class="px-3 py-2 font-mono">startDate</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">開始期（月次: YYYYMM、日次: YYYYMM）</td><td class="px-3 py-2 font-mono">202401</td></tr>
+            <tr><td class="px-3 py-2 font-mono">endDate</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">終了期（同上）</td><td class="px-3 py-2 font-mono">202412</td></tr>
+          </tbody>
+        </table>
+        <div class="bg-rose-50 rounded-lg p-3 text-xs text-rose-800 mb-4">
+          💡 <strong>系列コードの調べ方：</strong> <code>/boj/meta?db=DB名</code> でメタ情報を取得し、SERIES_CODE列を参照してください。
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">URL例（USD/JPY 日次）</h4>
+            <code class="block bg-slate-50 px-3 py-2 rounded text-xs text-slate-700">/boj/pass?db=FM08&code=FXERD04&startDate=202401</code>
+          </div>
+          <div>
+            <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1">URL例（USD/JPY 月次平均）</h4>
+            <code class="block bg-slate-50 px-3 py-2 rounded text-xs text-slate-700">/boj/pass?db=FM08&code=FXERM07&startDate=202401</code>
+          </div>
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Power Query 例</h4>
+        <pre class="bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto">let
+    url    = "https://stats-api-491107.web.app/boj/pass?db=FM08&code=FXERD04&startDate=202401",
+    source = Json.Document(Web.Contents(url)),
+    // RESULTSET の最初の系列を取得する
+    series = source[RESULTSET]{0},
+    dates  = series[VALUES][SURVEY_DATES],
+    values = series[VALUES][VALUES],
+    table  = Table.FromColumns({dates, values}, {"日付", "値"}),
+    typed  = Table.TransformColumnTypes(table, {{"値", type number}})
+in
+    typed</pre>
+      </div>
+
+      <!-- boj/layer -->
+      <div class="bg-white rounded-xl shadow-sm border border-rose-100 p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="bg-rose-600 text-white text-xs font-bold px-2 py-1 rounded">GET</span>
+          <code class="text-rose-700 font-semibold text-sm">/boj/layer</code>
+          <span class="text-sm text-slate-500">階層API — 階層情報でデータを一括取得</span>
+        </div>
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">パラメータ</h4>
+        <table class="text-xs w-full mb-4">
+          <thead class="bg-slate-50"><tr>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">パラメータ</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">必須</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">説明</th>
+            <th class="px-3 py-2 text-left font-semibold text-slate-600 border-b">例</th>
+          </tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            <tr><td class="px-3 py-2 font-mono">db</td><td class="px-3 py-2 text-red-500 font-semibold">必須</td><td class="px-3 py-2 text-slate-600">DB名</td><td class="px-3 py-2 font-mono">BP01</td></tr>
+            <tr><td class="px-3 py-2 font-mono">layer</td><td class="px-3 py-2 text-red-500 font-semibold">必須</td><td class="px-3 py-2 text-slate-600">階層情報（カンマ区切り。<code>*</code> でワイルドカード）</td><td class="px-3 py-2 font-mono">1,1,1</td></tr>
+            <tr><td class="px-3 py-2 font-mono">frequency</td><td class="px-3 py-2 text-red-500 font-semibold">必須</td><td class="px-3 py-2 text-slate-600">期種: CY（暦年）/ FY（年度）/ Q（四半期）/ M（月次）/ D（日次）</td><td class="px-3 py-2 font-mono">M</td></tr>
+            <tr><td class="px-3 py-2 font-mono">startDate</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">開始期</td><td class="px-3 py-2 font-mono">202504</td></tr>
+            <tr><td class="px-3 py-2 font-mono">endDate</td><td class="px-3 py-2 text-slate-400">任意</td><td class="px-3 py-2 text-slate-600">終了期</td><td
