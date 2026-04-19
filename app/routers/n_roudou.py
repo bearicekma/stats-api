@@ -14,8 +14,7 @@ router = APIRouter(prefix="/n_roudou", tags=["長野労働局"])
     summary="受理地別・産業別 新規求人数",
 )
 def n_roudou_juri_sangyo():
-
- """
+    """
     長野労働局の月次PDFから抽出した、産業大分類別の新規求人数。
 
     **産業コード一覧:**
@@ -39,9 +38,7 @@ def n_roudou_juri_sangyo():
     | うちパート | int | パート求人数 |
     | うちパート前月比 | float | パート前月比（%） |
     | うちパート前年同月比 | float | パート前年同月比（%） |
-  
-"""
-
+    """
     # GCSからParquetを読み込んで返す
     raw = get_stats("juri_sangyo", category="n_roudou")
 
