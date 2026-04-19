@@ -41,6 +41,7 @@ def n_roudou_juri_sangyo():
     | うちパート前年同月比 | float | パート前年同月比（%） |
   
 """
+
     # GCSからParquetを読み込んで返す
     raw = get_stats("juri_sangyo", category="n_roudou")
 
