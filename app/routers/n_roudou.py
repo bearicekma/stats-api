@@ -1,7 +1,6 @@
 # 長野労働局 新規求人数エンドポイント
 
 from fastapi           import APIRouter
-from fastapi.responses import JSONResponse
 from app.database      import get_stats
 from datetime          import datetime
 import math
@@ -27,17 +26,18 @@ def n_roudou_juri_sangyo():
 
     **レスポンスフィールド:**
 
-    | フィールド | 型 | 内容 |
-    |---|---|---|
-    | DATE | string | 年月（YYYY-MM-DD形式） |
-    | 産業コード | string | 産業の識別コード（上記参照） |
-    | 産業分類 | string | 産業名称 |
-    | 新規求人数 | int | 当月の新規求人数 |
-    | 前月比 | float | 前月比（%、▲はマイナス） |
-    | 前年同月比 | float | 前年同月比（%） |
-    | うちパート | int | パート求人数 |
-    | うちパート前月比 | float | パート前月比（%） |
-    | うちパート前年同月比 | float | パート前年同月比（%） |
+    <table>
+    <tr><th>フィールド</th><th>型</th><th>内容</th></tr>
+    <tr><td>DATE</td><td>string</td><td>年月（YYYY-MM-DD形式）</td></tr>
+    <tr><td>産業コード</td><td>string</td><td>産業の識別コード（上記参照）</td></tr>
+    <tr><td>産業分類</td><td>string</td><td>産業名称</td></tr>
+    <tr><td>新規求人数</td><td>int</td><td>当月の新規求人数</td></tr>
+    <tr><td>前月比</td><td>float</td><td>前月比（%、▲はマイナス）</td></tr>
+    <tr><td>前年同月比</td><td>float</td><td>前年同月比（%）</td></tr>
+    <tr><td>うちパート</td><td>int</td><td>パート求人数</td></tr>
+    <tr><td>うちパート前月比</td><td>float</td><td>パート前月比（%）</td></tr>
+    <tr><td>うちパート前年同月比</td><td>float</td><td>パート前年同月比（%）</td></tr>
+    </table>
     """
     # GCSからParquetを読み込んで返す
     raw = get_stats("juri_sangyo", category="n_roudou")
