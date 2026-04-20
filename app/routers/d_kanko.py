@@ -8,7 +8,7 @@ import duckdb
 import tempfile
 import os
 
-router = APIRouter(prefix="/stats/d_kanko", tags=["d_kanko"])
+router = APIRouter(prefix="/stats/d_kanko", tags=["デジタル観光統計"])
 
 BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 GCS_PATH    = "d_kanko/d_kanko.parquet"
@@ -34,20 +34,35 @@ def _normalize_date(value: str) -> str | None:
     return None
 
 
-@router.get("")
+@router.get(
+    "",
+    summary="デジタル観光統計オープンデータ取得",
+)
 async def get_d_kanko(request: Request):
-    # デジタル観光統計オープンデータを取得する
-    # パラメータ:
-    #   type : pref（都道府県のみ）/ city（市区町村のみ）/ 省略=両方
-    #   from : 開始年月（YYYY-MM または YYYY-MM-DD）
-    #   to   : 終了年月（YYYY-MM または YYYY-MM-DD）
-    #   pref : 都道府県名（部分一致）
-    #   city : 市区町村名（部分一致）※type=cityのみ有効
-    #
-    # 例: /stats/d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref
-    # 例: /stats/d_kanko?city=松本&type=city
-    # 例: /stats/d_kanko?pref=長野&type=city&from=2024-01&to=2024-12
+    """
+    観光庁「デジタル観光統計オープンデータ」から、都道府県・市区町村別の来訪者数を取得します。
+    パラメータを省略した場合は全件返します。
 
+    **クエリパラメータ:**
+    - `type` (任意) `pref`=都道府県のみ / `city`=市区町村のみ / 省略=両方
+    - `from` (任意) 開始年月（YYYY-MM または YYYY-MM-DD）
+    - `to` (任意) 終了年月（YYYY-MM または YYYY-MM-DD）
+    - `pref` (任意) 都道府県名（部分一致）
+    - `city` (任意) 市区町村名（部分一致）※ `type=city` のときのみ有効
+
+    **レスポンスフィールド:**
+    - `date` (string) 年月（YYYY-MM-DD形式）
+    - `区分` (string) `pref`=都道府県 / `city`=市区町村
+    - `都道府県コード` (string) 2桁
+    - `都道府県名` (string)
+    - `地域コード` (string) 5桁
+    - `地域名称` (string) 都道府県名または市区町村名
+    - `人数` (int) 来訪者数（千人）
+
+    **URL例:**
+    - `/stats/d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref`
+    - `/stats/d_kanko?city=松本&type=city`
+    """
     params = dict(request.query_params)
     type_  = params.get("type", None)
     from_  = _normalize_date(params.get("from", ""))
