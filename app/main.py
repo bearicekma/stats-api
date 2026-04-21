@@ -103,3 +103,35 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
         "message":   f"{target} の収集を開始しました",
         "timestamp": str(datetime.now())
     }
+
+@app.get("/enecho/test")
+async def enecho_test():
+    # 資源エネルギー庁サーバーへの疎通確認（テスト用・確認後削除）
+    import httpx
+    from datetime import datetime, timedelta, timezone
+
+    JST = timezone(timedelta(hours=9))
+    today = datetime.now(JST).date()
+    days_since_wed = (today.weekday() - 2) % 7
+    latest_wed = today - timedelta(days=days_since_wed)
+    reiwa_year = latest_wed.year - 2018
+    yy   = str(reiwa_year).zfill(2)
+    mmdd = latest_wed.strftime("%m%d")
+    url  = f"https://www.enecho.meti.go.jp/statistics/petroleum_and_lpgas/pl007/xlsx/{yy}{mmdd}s5.xlsx"
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; stats-api/1.0)",
+            "Referer": "https://www.enecho.meti.go.jp/statistics/petroleum_and_lpgas/pl007/results.html",
+        }
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            res = await client.get(url, headers=headers)
+        return {
+            "url":         url,
+            "status_code": res.status_code,
+            "content_type": res.headers.get("content-type"),
+            "content_length": len(res.content),
+            "ok": res.status_code == 200,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "url": url}
