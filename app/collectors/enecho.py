@@ -3,7 +3,6 @@
 
 import io
 import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -41,11 +40,16 @@ JST = timezone(timedelta(hours=9))
 
 def _build_url() -> str:
     # 直近の公表日（水曜）に基づいてダウンロードURLを組み立てる
+    # URLの形式: {西暦下2桁}{月2桁}{日2桁}s5.xlsx（例: 260422s5.xlsx）
     today = datetime.now(JST).date()
+    # 直近の水曜日を求める（weekday: 月=0, 水=2）
     days_since_wed = (today.weekday() - 2) % 7
+    # 当日が水曜かつ14時未満の場合は1週前にフォールバックする
+    if days_since_wed == 0 and datetime.now(JST).hour < 14:
+        days_since_wed = 7
     latest_wed = today - timedelta(days=days_since_wed)
-    reiwa_year = latest_wed.year - 2018
-    yy   = str(reiwa_year).zfill(2)
+    # 西暦の下2桁を使う（令和年ではない）
+    yy   = str(latest_wed.year)[-2:]
     mmdd = latest_wed.strftime("%m%d")
     return f"{ENECHO_BASE}/{yy}{mmdd}s5.xlsx"
 
