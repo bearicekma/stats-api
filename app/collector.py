@@ -6,6 +6,7 @@ import asyncio
 from app.notifier              import send_gmail
 from app.collectors.d_kanko    import collect_d_kanko_monthly
 from app.collectors.n_roudou   import collect_n_roudou_monthly
+from app.collectors.enecho     import collect_enecho_gasoline
 
 
 # ── 共通ヘルパー ─────────────────────────────────────────
@@ -61,11 +62,24 @@ async def run_n_roudou_collection():
         return 0
 
 
+async def run_enecho_collection():
+    # 資源エネルギー庁 給油所小売価格調査の定期収集
+    # 実行タイミング: 毎週水曜 15:00 JST（GitHub Actions経由）
+    try:
+        count = await asyncio.to_thread(collect_enecho_gasoline)
+        print(f"✅ enecho: {count}件")
+        _notify("enecho_gasoline", count)
+        return count
+    except Exception as e:
+        print(f"❌ エラー: enecho: {e}")
+        _notify("enecho_gasoline", 0, error=str(e))
+        return 0
+
+
 # ── 全データソース一括収集（手動実行・デバッグ用） ─────────
 
 async def run_all_collections():
     # 全データソースの定期収集を実行する（ラッパー関数）
-    # 通常はデータソース別の個別関数をCloud Schedulerから呼ぶ
-    # 全件バックフィルや開発時の一括実行に使用する
     await run_d_kanko_collection()
     await run_n_roudou_collection()
+    await run_enecho_collection()
