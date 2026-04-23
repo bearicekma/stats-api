@@ -1,0 +1,40 @@
+# 資源エネルギー庁 給油所小売価格調査 週次収集ワークフロー
+# 毎週水曜15:00 JST（06:00 UTC）に自動実行する
+# GitHub ActionsのIPはGCPレンジ外のため、経産省サーバーへのアクセスが通る可能性がある
+
+name: collect-enecho-gasoline
+
+on:
+  schedule:
+    - cron: '0 6 * * 3'   # 毎週水曜 06:00 UTC = 15:00 JST
+  workflow_dispatch:       # 手動トリガーも可能
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージをインストール
+        run: |
+          pip install httpx pandas openpyxl pyarrow google-cloud-storage
+
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: 収集スクリプトを実行
+        run: python scripts/collect_enecho.py
+
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
