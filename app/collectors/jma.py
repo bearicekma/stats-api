@@ -287,21 +287,23 @@ def _format_line_message(df: pd.DataFrame) -> str:
         emoji   = WEATHER_EMOJI.get(code, EMOJI_FALLBACK.get(code[:1], "🌀"))
         weather = row["weather"] or ""
 
-        # 気温
+        # 気温（pandasでNoneがNaNに変換されるためpd.notna()で判定する）
         tmax = row["temp_max"]
         tmin = row["temp_min"]
-        if tmax is not None and tmin is not None:
+        if pd.notna(tmax) and pd.notna(tmin):
             temp_s = f"{int(tmax)}℃/{int(tmin)}℃"
-        elif tmax is not None:
+        elif pd.notna(tmax):
             temp_s = f"{int(tmax)}℃/--"
         else:
             temp_s = "--/--"
 
-        # 降水確率
-        pop_s = f"💧{row['precip_prob']}%" if row["precip_prob"] is not None else "💧--%"
+        # 降水確率（同上）
+        pop = row["precip_prob"]
+        pop_s = f"💧{int(pop)}%" if pd.notna(pop) else "💧--%"
 
-        # 風（nullなら省略）
-        wind_s = f"  🌀{row['wind']}" if row["wind"] else ""
+        # 風（NaN・None・空文字なら省略）
+        wind_val = row["wind"]
+        wind_s = f"  🌀{wind_val}" if pd.notna(wind_val) and wind_val else ""
 
         lines.append(f"{date_s} {emoji}{weather}  {temp_s}  {pop_s}{wind_s}")
 
