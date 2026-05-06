@@ -1,5 +1,4 @@
 # Stats API メインファイル
-# ルーターの登録と共通エンドポイントのみを記載する
 
 from fastapi           import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -11,8 +10,9 @@ from app.collector     import (
     run_d_kanko_collection,
     run_n_roudou_collection,
     run_enecho_collection,
+    run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma
 
 app = FastAPI(title="Stats API")
 
@@ -27,6 +27,7 @@ app.include_router(ndl.router)
 app.include_router(fred.router)
 app.include_router(n_roudou.router)
 app.include_router(enecho.router)
+app.include_router(jma.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
@@ -34,6 +35,7 @@ COLLECTION_TARGETS = {
     "d_kanko":         run_d_kanko_collection,
     "n_roudou":        run_n_roudou_collection,
     "enecho_gasoline": run_enecho_collection,
+    "jma_nagano":      run_jma_collection,
 }
 
 
@@ -51,14 +53,12 @@ def guide():
 
 @app.get("/master/{collection_name}")
 def get_master(collection_name: str):
-    # GCSのmaster/プレフィックス配下のParquetをDuckDBで読み込んで返す
     data = get_stats(collection_name, category="master")
     return {"collection": collection_name, "updated_at": str(datetime.now()), "count": len(data), "data": data}
 
 
 @app.get("/stats/{collection_name}")
 def get_collection(collection_name: str):
-    # GCSに保存されたParquetファイルをDuckDBで読み込んで返す
     data = get_stats(collection_name)
     return {"collection": collection_name, "updated_at": str(datetime.now()), "count": len(data), "data": data}
 
@@ -73,9 +73,9 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
     func = COLLECTION_TARGETS.get(target)
     if func is None:
         return JSONResponse(status_code=400, content={
-            "error": f"不正なtarget値: {target}",
-            "hint":  f"有効な値: {', '.join(COLLECTION_TARGETS.keys())}",
-            "example": "/collect?target=enecho_gasoline",
+            "error":   f"不正なtarget値: {target}",
+            "hint":    f"有効な値: {', '.join(COLLECTION_TARGETS.keys())}",
+            "example": "/collect?target=jma_nagano",
         })
 
     background_tasks.add_task(func)
