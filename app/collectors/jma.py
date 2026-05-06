@@ -311,22 +311,20 @@ def _format_line_message(df: pd.DataFrame) -> str:
 
 
 def _send_line(message: str) -> None:
-    """LINE Messaging APIにメッセージを同期送信する"""
+    """LINE Messaging APIにメッセージを同期送信する。失敗時は例外を投げる"""
     token   = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
     user_id = os.environ.get("LINE_USER_ID", "")
     if not token or not user_id:
-        print("⚠️ LINE認証情報が設定されていません")
-        return
+        raise RuntimeError(f"LINE認証情報が未設定: token={bool(token)}, user_id={bool(user_id)}")
     with httpx.Client(timeout=30) as client:
         res = client.post(
             "https://api.line.me/v2/bot/message/push",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"to": user_id, "messages": [{"type": "text", "text": message}]},
         )
-    if res.status_code == 200:
-        print("✅ LINE通知を送信しました")
-    else:
-        print(f"❌ LINE通知失敗: {res.status_code} {res.text}")
+    if res.status_code != 200:
+        raise RuntimeError(f"LINE送信失敗: status={res.status_code} body={res.text[:200]}")
+    print("✅ LINE通知を送信しました")
 
 
 def collect_jma_nagano() -> int:
