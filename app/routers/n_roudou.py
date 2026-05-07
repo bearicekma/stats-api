@@ -3,7 +3,6 @@
 from fastapi           import APIRouter
 from app.database      import get_stats
 from datetime          import datetime
-import math
 
 router = APIRouter(prefix="/n_roudou", tags=["長野労働局"])
 
@@ -40,15 +39,7 @@ def n_roudou_juri_sangyo():
     </table>
     """
     # GCSからParquetを読み込んで返す
-    raw = get_stats("juri_sangyo", category="n_roudou")
-
-    def clean(v):
-        # NaN・inf はJSONシリアライズできないためNoneに変換する
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        return v
-
-    data = [{k: clean(v) for k, v in row.items()} for row in raw]
+    data = get_stats("juri_sangyo", category="n_roudou")
     return {
         "collection": "juri_sangyo",
         "updated_at": str(datetime.now()),
