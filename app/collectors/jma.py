@@ -234,7 +234,10 @@ def _parse(raw: list) -> pd.DataFrame:
 
             records.append(make_record(date_str, loc, code, text, tmax, tmin, pop, rel, wind))
 
-    return pd.DataFrame(records)
+    df = pd.DataFrame(records)
+    # NaN→Noneに変換する（JSONシリアライズ対策）
+    # pandasはNullをfloat('nan')で表現するが、JSONにnanは存在しないためNoneに統一する
+    return df.where(pd.notna(df), None)
 
 
 def _upsert_to_gcs(new_df: pd.DataFrame) -> None:
