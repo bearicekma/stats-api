@@ -277,40 +277,40 @@ def _format_line_message(df: pd.DataFrame) -> str:
     """長野地点の7日分予報をLINE通知用テキストにフォーマットする"""
     nagano  = df[df["location"] == "長野"].sort_values("target_date")
     pub     = df["published_at"].iloc[0]
-    pub_str = datetime.fromisoformat(pub).strftime("%Y/%m/%d %H:%M")
+    pub_str = datetime.fromisoformat(pub).strftime("%Y/%m/%d（%a）%H:%M")
     wd_ja   = ["月", "火", "水", "木", "金", "土", "日"]
 
-    lines = ["☀️ 長野の1週間天気予報", f"（{pub_str}発表）", ""]
+    lines = ["☀️ 長野の1週間天気予報", f"{pub_str}発表", ""]
 
     for _, row in nagano.iterrows():
         td      = pd.to_datetime(row["target_date"])
         wd      = wd_ja[td.weekday()]
-        date_s  = td.strftime(f"%m/%d（{wd}）")
+        date_s  = td.strftime(f"%m/%d({wd})")
         code    = str(row["weather_code"])
         emoji   = WEATHER_EMOJI.get(code, EMOJI_FALLBACK.get(code[:1], "🌀"))
         weather = row["weather"] or ""
 
-        # 気温（pandasでNoneがNaNに変換されるためpd.notna()で判定する）
+        # 気温（一桁の場合にスペースで右揃えする）
         tmax = row["temp_max"]
         tmin = row["temp_min"]
         if pd.notna(tmax) and pd.notna(tmin):
-            temp_s = f"{int(tmax)}℃/{int(tmin)}℃"
+            temp_s = f"{int(tmax):>2}/{int(tmin):>2}℃"
         elif pd.notna(tmax):
-            temp_s = f"{int(tmax)}℃/--"
+            temp_s = f"{int(tmax):>2}/--℃"
         else:
-            temp_s = "--/--"
+            temp_s = "--/--℃"
 
-        # 降水確率（同上）
-        pop = row["precip_prob"]
-        pop_s = f"💧{int(pop)}%" if pd.notna(pop) else "💧--%"
+        # 降水確率
+        pop   = row["precip_prob"]
+        pop_s = f"💧{int(pop):>3}%" if pd.notna(pop) else "💧 --%"
 
-        # 風（NaN・None・空文字なら省略）
-        wind_val = row["wind"]
-        wind_s = f"  🌀{wind_val}" if pd.notna(wind_val) and wind_val else ""
+        # 確度（今日・明日はデータなしのため省略）
+        rel   = row["reliability"]
+        rel_s = f"  確度{rel}" if pd.notna(rel) and rel else ""
 
-        lines.append(f"{date_s} {emoji}{weather}  {temp_s}  {pop_s}{wind_s}")
+        lines.append(f"{date_s} {emoji} {weather}  {temp_s}  {pop_s}{rel_s}")
 
-    return "\n".join(lines)
+    return "\\n".join(lines)
 
 
 def _send_line(message: str) -> None:
