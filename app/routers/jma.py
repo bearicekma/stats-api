@@ -113,7 +113,12 @@ async def get_jma_nagano(request: Request):
             ORDER BY target_date, location
         """
         result = duckdb.query(sql).df()
-        data   = result.to_dict(orient="records")
+        # Parquetのfloat列はNoneをNaNで保存するためJSONシリアライズ前にNoneに変換する
+        import math
+        def _clean(v):
+            return None if isinstance(v, float) and math.isnan(v) else v
+        data = [{k: _clean(v) for k, v in row.items()}
+                for row in result.to_dict(orient="records")]
         return {"count": len(data), "updated_at": str(datetime.now()), "data": data}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

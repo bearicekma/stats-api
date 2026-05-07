@@ -142,10 +142,10 @@ def _parse(raw: list) -> pd.DataFrame:
     for area in s2["areas"]:
         t = area.get("temps", [])
         short_temps[area["area"]["name"]] = {
-            "today_max": _to_float(t[0]) if len(t) > 0 else None,
-            "today_min": _to_float(t[1]) if len(t) > 1 else None,
-            "tmrw_min":  _to_float(t[2]) if len(t) > 2 else None,
-            "tmrw_max":  _to_float(t[3]) if len(t) > 3 else None,
+            "today_max": _to_float(t[1]) if len(t) > 1 else None,  # t[1]=今日の最高
+            "today_min": _to_float(t[0]) if len(t) > 0 else None,  # t[0]=今日の最低
+            "tmrw_min":  _to_float(t[2]) if len(t) > 2 else None,  # t[2]=明日の最低
+            "tmrw_max":  _to_float(t[3]) if len(t) > 3 else None,  # t[3]=明日の最高
         }
 
     # ── 週間予報を整理する ──────────────────────────────────────────
