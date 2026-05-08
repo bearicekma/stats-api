@@ -1,8 +1,10 @@
 # EDINET（金融庁 企業開示システム）APIエンドポイント
 # /edinet/documents        : 書類一覧API（単一日付・日付範囲検索）
 # /edinet/document/{doc_id}: 書類取得API（CSV展開してJSONで返す）
+# /edinet/codes            : EDINETコードリスト（全提出者一覧）
 
 import asyncio
+import calendar
 import io
 import os
 import zipfile
@@ -10,61 +12,33 @@ from datetime import date, datetime, timedelta
 
 import httpx
 import pandas as pd
+from dateutil.relativedelta import relativedelta
 from fastapi           import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/edinet", tags=["EDINET 金融庁開示書類"])
 
 EDINET_BASE         = "https://api.edinet-fsa.go.jp/api/v2"
-RATE_LIMIT_SECONDS  = 3   # EDINET API推奨のリクエスト間隔（秒）
-MAX_DATE_RANGE_DAYS = 60  # 日付範囲検索の上限
-
-
-def _infer_date_range(period_end_str: str) -> tuple[str, str]:
-    # period_endから提出日の推定範囲を計算する（決算後2〜4ヶ月）
-    # 例: period_end=2025-03-31 → date_from=2025-05-01, date_to=2025-07-31
-    from dateutil.relativedelta import relativedelta
-    pe        = datetime.strptime(period_end_str, "%Y-%m-%d").date()
-    from_date = (pe + relativedelta(months=2)).replace(day=1)
-    to_month  = pe + relativedelta(months=4)
-    import calendar
-    last_day  = calendar.monthrange(to_month.year, to_month.month)[1]
-    to_date   = to_month.replace(day=last_day)
-    return from_date.isoformat(), to_date.isoformat()
-
-
-def _infer_date_range(period_end_str: str) -> tuple[str, str]:
-    # period_endから提出日の推定範囲を計算する（決算後2〜4ヶ月）
-    # 例: period_end=2025-03-31 → date_from=2025-05-01, date_to=2025-07-31
-    from dateutil.relativedelta import relativedelta
-    pe        = datetime.strptime(period_end_str, "%Y-%m-%d").date()
-    from_date = (pe + relativedelta(months=2)).replace(day=1)
-    to_month  = pe + relativedelta(months=4)
-    import calendar
-    last_day  = calendar.monthrange(to_month.year, to_month.month)[1]
-    to_date   = to_month.replace(day=last_day)
-    return from_date.isoformat(), to_date.isoformat()
-
-
-def _infer_date_range(period_end_str: str) -> tuple[str, str]:
-    # period_endから提出日の推定範囲を計算する（決算後2〜4ヶ月）
-    # 例: period_end=2025-03-31 → date_from=2025-05-01, date_to=2025-07-31
-    from dateutil.relativedelta import relativedelta
-    pe        = datetime.strptime(period_end_str, "%Y-%m-%d").date()
-    from_date = (pe + relativedelta(months=2)).replace(day=1)
-    to_month  = pe + relativedelta(months=4)
-    import calendar
-    last_day  = calendar.monthrange(to_month.year, to_month.month)[1]
-    to_date   = to_month.replace(day=last_day)
-    return from_date.isoformat(), to_date.isoformat()
+RATE_LIMIT_SECONDS  = 3
+MAX_DATE_RANGE_DAYS = 60
 
 
 def _api_key() -> str:
-    # 環境変数からAPIキーを取得する
     key = os.environ.get("EDINET", "")
     if not key:
         raise RuntimeError("環境変数 EDINET が設定されていません")
     return key
+
+
+def _infer_date_range(period_end_str: str) -> tuple[str, str]:
+    # period_endから提出日の推定範囲を計算する（決算後2〜4ヶ月）
+    # 例: period_end=2025-03-31 → date_from=2025-05-01, date_to=2025-07-31
+    pe        = datetime.strptime(period_end_str, "%Y-%m-%d").date()
+    from_date = (pe + relativedelta(months=2)).replace(day=1)
+    to_month  = pe + relativedelta(months=4)
+    last_day  = calendar.monthrange(to_month.year, to_month.month)[1]
+    to_date   = to_month.replace(day=last_day)
+    return from_date.isoformat(), to_date.isoformat()
 
 
 async def _fetch_one_day(date_str: str, api_key: str) -> list:
@@ -89,13 +63,14 @@ async def edinet_documents(request: Request):
     APIキーは不要（サーバー側で付与）。
 
     **クエリパラメータ:**
-    - `date` (必須 / date_fromと二択) 単一日付（YYYY-MM-DD）
-    - `date_from` (必須 / dateと二択) 範囲検索の開始日（YYYY-MM-DD）
+    - `date` (任意) 単一日付（YYYY-MM-DD）。省略時は当日
+    - `date_from` (任意) 範囲検索の開始日（YYYY-MM-DD）。指定時はdateより優先
     - `date_to` (任意) 範囲検索の終了日（YYYY-MM-DD）。省略時は当日。最大60日間
     - `doc_type` (任意) 書類種別コードで絞込（下記参照）
     - `period_end` (任意) 決算日で絞込（YYYY-MM-DD）。例: 3月決算なら `2026-03-31`
     - `edinet_code` (任意) EDINETコードで絞込（完全一致）。例: `E02144`
     - `filer_name` (任意) 提出者名で絞込（部分一致）。例: `トヨタ`
+    - ※ `period_end` のみ指定した場合は提出日範囲を自動推定します（決算後2〜4ヶ月）
 
     **⚠️ 日付範囲検索の注意:**
     EDINET APIのレート制限（3秒/リクエスト）により、範囲が広いほど時間がかかります。
@@ -104,38 +79,35 @@ async def edinet_documents(request: Request):
     **レスポンスフィールド（results[]）:**
     - `docID` 書類管理番号（書類取得APIで使用）
     - `filerName` 提出者名
-    - `secCode` 証券コード
     - `edinetCode` EDINETコード
+    - `secCode` 証券コード
     - `docTypeCode` 書類種別コード
     - `docDescription` 書類名称
     - `submitDateTime` 提出日時
     - `periodStart` / `periodEnd` 対象会計期間
     - `csvFlag` CSVファイル有無（`1`=あり）
-    - `xbrlFlag` XBRLファイル有無（`1`=あり）
     - `pdfFlag` PDFファイル有無（`1`=あり）
 
     **書類種別コード（doc_type）一覧:**
-    - `010` 有価証券通知書 / `020` 変更通知書（有価証券通知書）
-    - `030` 有価証券届出書 / `040` 訂正有価証券届出書
+    - `010` 有価証券通知書 / `030` 有価証券届出書 / `040` 訂正有価証券届出書
     - `080` 発行登録書 / `090` 訂正発行登録書 / `100` 発行登録追補書類
     - `120` **有価証券報告書** / `130` 訂正有価証券報告書
     - `135` 確認書 / `136` 訂正確認書
     - `140` **四半期報告書** / `150` 訂正四半期報告書
     - `160` **半期報告書** / `170` 訂正半期報告書
     - `180` **臨時報告書** / `190` 訂正臨時報告書
-    - `200` 親会社等状況報告書 / `210` 訂正親会社等状況報告書
-    - `220` 自己株券買付状況報告書 / `230` 訂正自己株券買付状況報告書
+    - `200` 親会社等状況報告書 / `220` 自己株券買付状況報告書
     - `235` 内部統制報告書 / `236` 訂正内部統制報告書
-    - `240` 公開買付届出書 / `250` 訂正公開買付届出書
-    - `270` 公開買付報告書 / `280` 訂正公開買付報告書
-    - `290` 意見表明報告書 / `300` 訂正意見表明報告書
-    - `310` 対質問回答報告書 / `320` 訂正対質問回答報告書
+    - `240` 公開買付届出書 / `270` 公開買付報告書
+    - `290` 意見表明報告書 / `310` 対質問回答報告書
     - `350` **大量保有報告書**
 
     **URL例:**
-    - `/edinet/documents?date=2026-05-07` 単一日付
-    - `/edinet/documents?date=2026-05-07&doc_type=120` 有価証券報告書のみ
-    - `/edinet/documents?date_from=2025-06-01&date_to=2025-07-31&doc_type=120&period_end=2025-03-31`
+    - `/edinet/documents` 当日の書類一覧
+    - `/edinet/documents?doc_type=120` 当日の有価証券報告書
+    - `/edinet/documents?date=2026-05-07&doc_type=120`
+    - `/edinet/documents?period_end=2025-03-31&doc_type=120` 3月決算の報告書を自動検索
+    - `/edinet/documents?date_from=2025-06-01&date_to=2025-07-31&filer_name=トヨタ`
     """
     params      = dict(request.query_params)
     date_single = params.get("date")
@@ -146,18 +118,22 @@ async def edinet_documents(request: Request):
     edinet_code = params.get("edinet_code")
     filer_name  = params.get("filer_name")
 
-    api_key = _api_key()
+    try:
+        api_key = _api_key()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-    # date または date_from が必須
+    # date・date_from 省略時の処理
+    # period_end指定あり → 提出日範囲を自動推定する（決算後2〜4ヶ月）
+    # 何も指定なし      → 当日をデフォルトにする
     if not date_single and not date_from:
-        return JSONResponse(status_code=400, content={
-            "error":          "date または date_from パラメータは必須です",
-            "example_single": "/edinet/documents?date=2026-05-07",
-            "example_range":  "/edinet/documents?date_from=2025-06-01&date_to=2025-07-31&doc_type=120",
-        })
+        if period_end:
+            date_from, date_to = _infer_date_range(period_end)
+        else:
+            date_single = date.today().isoformat()
 
     def _filter(results: list) -> list:
-        # doc_type・period_end・edinet_code・filer_name でフィルタリングする
+        # 各パラメータでフィルタリングする
         if doc_type:
             results = [r for r in results if r.get("docTypeCode") == doc_type]
         if period_end:
@@ -197,8 +173,8 @@ async def edinet_documents(request: Request):
             "hint":  "レート制限のため範囲が広いほど時間がかかります（約3秒/日）",
         })
 
-    all_results  = []
-    current      = from_date
+    all_results    = []
+    current        = from_date
     dates_searched = 0
 
     while current <= to_date:
@@ -209,10 +185,11 @@ async def edinet_documents(request: Request):
         if current <= to_date:
             await asyncio.sleep(RATE_LIMIT_SECONDS)
 
+    filtered = _filter(all_results)
     return {
-        "count":          len(_filter(all_results)),
+        "count":          len(filtered),
         "dates_searched": dates_searched,
-        "results":        _filter(all_results),
+        "results":        filtered,
     }
 
 
@@ -232,22 +209,14 @@ async def edinet_document(doc_id: str, request: Request):
     - `file` (任意) 取得するCSVファイル名（部分一致）。省略時はZIP内のファイル一覧を返します
 
     **fileパラメータ省略時のレスポンス:**
-```json
-    {
-      "doc_id": "S100XXXX",
-      "files": ["jpcrp_cor-BalanceSheet.csv", "jpcrp_cor-StatementOfIncome.csv", ...]
-    }
-```
+    - `doc_id` 書類管理番号
+    - `files` ZIP内のCSVファイル名一覧
 
     **file指定時のレスポンス:**
-```json
-    {
-      "doc_id": "S100XXXX",
-      "file": "jpcrp_cor-BalanceSheet.csv",
-      "count": 120,
-      "data": [{"要素ID": "...", "コンテキストID": "...", "値": "...", "単位ID": "..."}, ...]
-    }
-```
+    - `doc_id` 書類管理番号
+    - `file` 取得したCSVファイル名
+    - `count` レコード数
+    - `data` CSVの内容（JSON形式）
 
     **主なfileキーワード:**
     - `BalanceSheet` 貸借対照表
@@ -261,7 +230,11 @@ async def edinet_document(doc_id: str, request: Request):
     - `/edinet/document/S100XXXX?file=StatementOfIncome` 損益計算書を取得
     """
     file_filter = dict(request.query_params).get("file")
-    api_key     = _api_key()
+
+    try:
+        api_key = _api_key()
+    except RuntimeError as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
     # type=5（CSV）でZIPをダウンロードする
     async with httpx.AsyncClient(timeout=60) as client:
@@ -347,7 +320,6 @@ async def edinet_codes(request: Request):
     - `提出者法人番号` 法人番号
 
     **URL例:**
-    - `/edinet/codes` 全件取得（数千件）
     - `/edinet/codes?filer_name=トヨタ` トヨタを含む企業を絞込
     - `/edinet/codes?sec_code=7203` 証券コード7203で絞込
     """
@@ -365,12 +337,11 @@ async def edinet_codes(request: Request):
             "error": f"EDINETコードリストのダウンロードに失敗しました: {res.status_code}"
         })
 
-    # ZIPを展開してCSVを読み込む
+    # ZIPを展開してCSVを読み込む（1行目はタイトル、2行目がヘッダー）
     try:
         zf       = zipfile.ZipFile(io.BytesIO(res.content))
         csv_name = [f for f in zf.namelist() if f.endswith(".csv")][0]
-        # 1行目はタイトル行、2行目がヘッダーのためskiprows=1
-        df = pd.read_csv(
+        df       = pd.read_csv(
             io.BytesIO(zf.read(csv_name)),
             encoding="cp932",
             skiprows=1,
@@ -381,9 +352,6 @@ async def edinet_codes(request: Request):
 
     # フィルタリングする
     if filer_name:
-        mask = df.apply(lambda row: row.astype(str).str.contains(
-            filer_name, case=False, na=False).any(), axis=1)
-        # 提出者名列で絞り込む
         col = [c for c in df.columns if "提出者名" in c and "英字" not in c and "ヨミ" not in c]
         if col:
             df = df[df[col[0]].str.contains(filer_name, case=False, na=False)]
@@ -392,5 +360,4 @@ async def edinet_codes(request: Request):
         if col:
             df = df[df[col[0]] == sec_code]
 
-    data = df.to_dict(orient="records")
-    return {"count": len(data), "data": data}
+    return {"count": len(df), "data": df.to_dict(orient="records")}
