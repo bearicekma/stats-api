@@ -55,6 +55,8 @@ async def edinet_documents(request: Request):
     - `date_to` (任意) 範囲検索の終了日（YYYY-MM-DD）。省略時は当日。最大60日間
     - `doc_type` (任意) 書類種別コードで絞込（下記参照）
     - `period_end` (任意) 決算日で絞込（YYYY-MM-DD）。例: 3月決算なら `2026-03-31`
+    - `edinet_code` (任意) EDINETコードで絞込（完全一致）。例: `E02144`
+    - `filer_name` (任意) 提出者名で絞込（部分一致）。例: `トヨタ`
 
     **⚠️ 日付範囲検索の注意:**
     EDINET APIのレート制限（3秒/リクエスト）により、範囲が広いほど時間がかかります。
@@ -96,12 +98,14 @@ async def edinet_documents(request: Request):
     - `/edinet/documents?date=2026-05-07&doc_type=120` 有価証券報告書のみ
     - `/edinet/documents?date_from=2025-06-01&date_to=2025-07-31&doc_type=120&period_end=2025-03-31`
     """
-    params     = dict(request.query_params)
+    params      = dict(request.query_params)
     date_single = params.get("date")
     date_from   = params.get("date_from")
     date_to     = params.get("date_to")
     doc_type    = params.get("doc_type")
     period_end  = params.get("period_end")
+    edinet_code = params.get("edinet_code")
+    filer_name  = params.get("filer_name")
 
     api_key = _api_key()
 
@@ -114,11 +118,16 @@ async def edinet_documents(request: Request):
         })
 
     def _filter(results: list) -> list:
-        # doc_type・period_end でフィルタリングする
+        # doc_type・period_end・edinet_code・filer_name でフィルタリングする
         if doc_type:
             results = [r for r in results if r.get("docTypeCode") == doc_type]
         if period_end:
             results = [r for r in results if r.get("periodEnd") == period_end]
+        if edinet_code:
+            results = [r for r in results if r.get("edinetCode") == edinet_code]
+        if filer_name:
+            results = [r for r in results
+                       if filer_name.lower() in (r.get("filerName") or "").lower()]
         return results
 
     # ── 単一日付 ─────────────────────────────────────────
@@ -274,3 +283,75 @@ async def edinet_document(doc_id: str, request: Request):
         "count":  len(df),
         "data":   df.to_dict(orient="records"),
     }
+
+
+@router.get(
+    "/codes",
+    summary="EDINETコードリスト — 全提出者一覧を取得",
+)
+async def edinet_codes(request: Request):
+    """
+    EDINETに登録された全提出者の一覧をEDINET公開ZIPから取得します。
+    APIキーは不要。
+
+    **クエリパラメータ:**
+    - `filer_name` (任意) 提出者名で絞込（部分一致）。例: `トヨタ`
+    - `sec_code` (任意) 証券コードで絞込（完全一致）。例: `7203`
+
+    **レスポンスフィールド（data[]）:**
+    - `EDINETコード` EDINETコード
+    - `提出者名` 企業・ファンド名
+    - `証券コード` 上場企業の証券コード（非上場はnull）
+    - `提出者業種` 業種区分
+    - `上場区分` 上場・非上場
+    - `決算日` 決算月日（MM/DD形式）
+    - `提出者法人番号` 法人番号
+
+    **URL例:**
+    - `/edinet/codes` 全件取得（数千件）
+    - `/edinet/codes?filer_name=トヨタ` トヨタを含む企業を絞込
+    - `/edinet/codes?sec_code=7203` 証券コード7203で絞込
+    """
+    params     = dict(request.query_params)
+    filer_name = params.get("filer_name")
+    sec_code   = params.get("sec_code")
+
+    # EDINETコードリストのZIPをダウンロードする
+    url = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip"
+    async with httpx.AsyncClient(timeout=60) as client:
+        res = await client.get(url)
+
+    if res.status_code != 200:
+        return JSONResponse(status_code=res.status_code, content={
+            "error": f"EDINETコードリストのダウンロードに失敗しました: {res.status_code}"
+        })
+
+    # ZIPを展開してCSVを読み込む
+    try:
+        zf       = zipfile.ZipFile(io.BytesIO(res.content))
+        csv_name = [f for f in zf.namelist() if f.endswith(".csv")][0]
+        # 1行目はタイトル行、2行目がヘッダーのためskiprows=1
+        df = pd.read_csv(
+            io.BytesIO(zf.read(csv_name)),
+            encoding="cp932",
+            skiprows=1,
+            dtype=str,
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"CSV解析エラー: {str(e)}"})
+
+    # フィルタリングする
+    if filer_name:
+        mask = df.apply(lambda row: row.astype(str).str.contains(
+            filer_name, case=False, na=False).any(), axis=1)
+        # 提出者名列で絞り込む
+        col = [c for c in df.columns if "提出者名" in c and "英字" not in c and "ヨミ" not in c]
+        if col:
+            df = df[df[col[0]].str.contains(filer_name, case=False, na=False)]
+    if sec_code:
+        col = [c for c in df.columns if "証券コード" in c]
+        if col:
+            df = df[df[col[0]] == sec_code]
+
+    data = df.to_dict(orient="records")
+    return {"count": len(data), "data": data}
