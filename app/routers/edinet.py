@@ -46,6 +46,19 @@ def _infer_date_range(period_end_str: str) -> tuple[str, str]:
     return from_date.isoformat(), to_date.isoformat()
 
 
+def _infer_date_range(period_end_str: str) -> tuple[str, str]:
+    # period_endから提出日の推定範囲を計算する（決算後2〜4ヶ月）
+    # 例: period_end=2025-03-31 → date_from=2025-05-01, date_to=2025-07-31
+    from dateutil.relativedelta import relativedelta
+    pe        = datetime.strptime(period_end_str, "%Y-%m-%d").date()
+    from_date = (pe + relativedelta(months=2)).replace(day=1)
+    to_month  = pe + relativedelta(months=4)
+    import calendar
+    last_day  = calendar.monthrange(to_month.year, to_month.month)[1]
+    to_date   = to_month.replace(day=last_day)
+    return from_date.isoformat(), to_date.isoformat()
+
+
 def _api_key() -> str:
     # 環境変数からAPIキーを取得する
     key = os.environ.get("EDINET", "")
