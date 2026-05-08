@@ -9,3 +9,6 @@ anthropic
 pdfplumber
 beautifulsoup4
 xmltodict
+python-dateutil
+openpyxl
+orjson
