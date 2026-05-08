@@ -126,9 +126,11 @@ async def edinet_documents(request: Request):
     # date・date_from 省略時の処理
     # period_end指定あり → 提出日範囲を自動推定する（決算後2〜4ヶ月）
     # 何も指定なし      → 当日をデフォルトにする
+    auto_inferred = False
     if not date_single and not date_from:
         if period_end:
             date_from, date_to = _infer_date_range(period_end)
+            auto_inferred = True  # 自動推定の場合は上限チェックをバイパスする
         else:
             date_single = date.today().isoformat()
 
@@ -167,7 +169,7 @@ async def edinet_documents(request: Request):
         return JSONResponse(status_code=400, content={
             "error": "date_from は date_to より前の日付を指定してください"
         })
-    if (to_date - from_date).days > MAX_DATE_RANGE_DAYS:
+    if not auto_inferred and (to_date - from_date).days > MAX_DATE_RANGE_DAYS:
         return JSONResponse(status_code=400, content={
             "error": f"日付範囲は最大{MAX_DATE_RANGE_DAYS}日までです",
             "hint":  "レート制限のため範囲が広いほど時間がかかります（約3秒/日）",
