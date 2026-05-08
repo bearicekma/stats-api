@@ -1,7 +1,7 @@
 # Stats API メインファイル
 
 from fastapi           import FastAPI, BackgroundTasks
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, ORJSONResponse
 from pathlib           import Path
 from datetime          import datetime
 from app.database      import get_stats
@@ -12,9 +12,9 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet
 
-app = FastAPI(title="Stats API")
+app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
 
 # 個別ルーターを先に登録する（/stats/{collection_name}との競合を回避）
 app.include_router(d_kanko.router)
@@ -28,6 +28,7 @@ app.include_router(fred.router)
 app.include_router(n_roudou.router)
 app.include_router(enecho.router)
 app.include_router(jma.router)
+app.include_router(edinet.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
