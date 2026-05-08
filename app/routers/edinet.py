@@ -274,18 +274,3 @@ async def edinet_document(doc_id: str, request: Request):
         "count":  len(df),
         "data":   df.to_dict(orient="records"),
     }
-
-
-@router.get("/debug", summary="デバッグ用（確認後削除）")
-async def edinet_debug():
-    import traceback
-    try:
-        key = _api_key()
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(
-                f"{EDINET_BASE}/documents.json",
-                params={"date": "2026-05-07", "type": "1", "Subscription-Key": key},
-            )
-        return {"ok": True, "status": res.status_code, "body": res.text[:500]}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
