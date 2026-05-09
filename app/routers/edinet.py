@@ -93,6 +93,46 @@ async def _pinpoint_search(period_end_str: str, api_key: str, filter_fn) -> tupl
     return [], dates_searched
 
 
+def _pinpoint_dates(period_end_str: str) -> list[date]:
+    # period_endから提出日の候補を優先度順に返す
+    # 提出は決算月+3ヶ月後半に集中するため、そこから検索を開始する
+    pe = datetime.strptime(period_end_str, "%Y-%m-%d").date()
+    m2 = (pe + relativedelta(months=2)).replace(day=1)
+    m3 = (pe + relativedelta(months=3)).replace(day=1)
+    m4 = (pe + relativedelta(months=4)).replace(day=1)
+
+    def days_of(yr, mo, d_from, d_to):
+        last = calendar.monthrange(yr, mo)[1]
+        return [date(yr, mo, d) for d in range(d_from, min(d_to, last) + 1)]
+
+    return (
+        list(reversed(days_of(m3.year, m3.month, 16, 31))) +  # ① +3ヶ月後半（最多）
+        list(reversed(days_of(m2.year, m2.month, 16, 31))) +  # ② +2ヶ月後半（早期）
+        list(reversed(days_of(m3.year, m3.month,  1, 15))) +  # ③ +3ヶ月前半
+        list(reversed(days_of(m4.year, m4.month,  1, 31))) +  # ④ +4ヶ月（遅延）
+        list(reversed(days_of(m2.year, m2.month,  1, 15)))    # ⑤ +2ヶ月前半
+    )
+
+
+async def _pinpoint_search(period_end_str: str, api_key: str, filter_fn) -> tuple[list, int]:
+    # 優先度順に1日ずつ検索し、結果が見つかった時点で即座に返す
+    candidates   = _pinpoint_dates(period_end_str)
+    dates_searched = 0
+    today        = date.today()
+
+    for d in candidates:
+        if d > today:
+            continue
+        results = await _fetch_one_day(d.isoformat(), api_key)
+        dates_searched += 1
+        filtered = filter_fn(results)
+        if filtered:
+            return filtered, dates_searched
+        await asyncio.sleep(RATE_LIMIT_SECONDS)
+
+    return [], dates_searched
+
+
 @router.get(
     "/documents",
     summary="書類一覧API — 指定日または期間に提出された書類一覧を取得",
@@ -163,21 +203,6 @@ async def edinet_documents(request: Request):
     except RuntimeError as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-    # period_end指定かつdate/date_from未指定 → ピンポイント検索
-    if period_end and not date_single and not date_from:
-        def _f(r): return _filter(r)
-        results, searched = await _pinpoint_search(period_end, api_key, _filter)
-        return {
-            "count":          len(results),
-            "dates_searched": searched,
-            "results":        results,
-        }
-
-    # date・date_from 省略時は当日をデフォルトにする
-    auto_inferred = False
-    if not date_single and not date_from:
-        date_single = date.today().isoformat()
-
     def _filter(results: list) -> list:
         # 各パラメータでフィルタリングする
         if doc_type:
@@ -190,6 +215,20 @@ async def edinet_documents(request: Request):
             results = [r for r in results
                        if filer_name.lower() in (r.get("filerName") or "").lower()]
         return results
+
+    # period_end指定かつdate/date_from未指定 → ピンポイント検索
+    if period_end and not date_single and not date_from:
+        results, searched = await _pinpoint_search(period_end, api_key, _filter)
+        return {
+            "count":          len(results),
+            "dates_searched": searched,
+            "results":        results,
+        }
+
+    # date・date_from 省略時は当日をデフォルトにする
+    auto_inferred = False
+    if not date_single and not date_from:
+        date_single = date.today().isoformat()
 
     # ── 単一日付 ─────────────────────────────────────────
     if date_single:
