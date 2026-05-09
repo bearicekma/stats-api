@@ -1,5 +1,5 @@
 # デジタル観光統計オープンデータエンドポイント
-# /stats/d_kanko : 観光来訪者数データの取得（期間・都道府県・市区町村で絞り込み可）
+# /d_kanko : 観光来訪者数データの取得（期間・都道府県・市区町村で絞り込み可）
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ import duckdb
 import tempfile
 import os
 
-router = APIRouter(prefix="/stats/d_kanko", tags=["デジタル観光統計"])
+router = APIRouter(prefix="/d_kanko", tags=["デジタル観光統計"])
 
 BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 GCS_PATH    = "d_kanko/d_kanko.parquet"
@@ -60,8 +60,8 @@ async def get_d_kanko(request: Request):
     - `人数` (int) 来訪者数（千人）
 
     **URL例:**
-    - `/stats/d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref`
-    - `/stats/d_kanko?city=松本&type=city`
+    - `/d_kanko?pref=長野&from=2024-01&to=2024-12&type=pref`
+    - `/d_kanko?city=松本&type=city`
     """
     params = dict(request.query_params)
     type_  = params.get("type", None)

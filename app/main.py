@@ -16,10 +16,8 @@ from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, j
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
 
-# 個別ルーターを先に登録する（/stats/{collection_name}との競合を回避）
-app.include_router(d_kanko.router)
-
 # 各データソースのルーターを登録する
+app.include_router(d_kanko.router)
 app.include_router(estat.router)
 app.include_router(boj.router)
 app.include_router(eia.router)
