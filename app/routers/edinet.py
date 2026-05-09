@@ -263,9 +263,9 @@ async def edinet_document(request: Request):
     - 様式コード `030000`=有価証券報告書 / `040000`=四半期 / `060000`=半期
 
     **URL例:**
-    - `/edinet/document?doc_ids=S100XXXX` 単一取得（ファイル一覧）
-    - `/edinet/document?doc_ids=S100XXXX,S100YYYY&file=jpcrp030000-asr` 複数取得
-    - `/edinet/document?doc_ids=S100XXXX&file=BalanceSheet` 貸借対照表を取得
+    - `/edinet/get?doc_ids=S100XXXX` 単一取得（ファイル一覧）
+    - `/edinet/get?doc_ids=S100XXXX,S100YYYY&file=jpcrp030000-asr` 複数取得
+    - `/edinet/get?doc_ids=S100XXXX&file=BalanceSheet` 貸借対照表を取得
     """
     params      = dict(request.query_params)
     doc_ids_raw = params.get("doc_ids", "")
@@ -274,7 +274,7 @@ async def edinet_document(request: Request):
     if not doc_ids_raw:
         return JSONResponse(status_code=400, content={
             "error":   "doc_ids パラメータは必須です",
-            "example": "/edinet/document?doc_ids=S100XXXX,S100YYYY&file=jpcrp030000-asr",
+            "example": "/edinet/get?doc_ids=S100XXXX,S100YYYY&file=jpcrp030000-asr",
         })
 
     doc_ids = [d.strip() for d in doc_ids_raw.split(",") if d.strip()]
