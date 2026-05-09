@@ -222,7 +222,7 @@ async def edinet_documents(request: Request):
 
 
 @router.get(
-    "/document",
+    "/get",
     summary="書類取得API — CSVファイルをJSON形式で取得（複数件対応）",
 )
 async def edinet_document(request: Request):
