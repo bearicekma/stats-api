@@ -29,6 +29,12 @@ def _notify(source_name: str, count: int, error: str | None = None):
 
 async def run_d_kanko_collection():
     # デジタル観光統計オープンデータの定期収集（毎月第2木曜 1:00 JST）
+    # cron「8-14 * *」はOR仕様のため、コード側で木曜（weekday=3）を確認する
+    from datetime import datetime, timezone, timedelta
+    JST = timezone(timedelta(hours=9))
+    if datetime.now(JST).weekday() != 3:  # 3=木曜
+        print("⏭ d_kanko: 木曜以外のためスキップ")
+        return 0
     try:
         count = await asyncio.to_thread(collect_d_kanko_monthly)
         print(f"✅ d_kanko: {count}件")
