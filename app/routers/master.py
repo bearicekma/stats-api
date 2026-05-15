@@ -1,5 +1,5 @@
 # マスタデータエンドポイント
-# /master/_M_prefecture : 都道府県マスタ
+# /master/_M_pref : 都道府県マスタ
 # /master/_M_city       : 市区町村マスタ
 # /master/_M_calendar   : カレンダーマスタ（祝日・平日判定）
 
@@ -35,11 +35,11 @@ async def get_master(collection_name: str, request: Request):
     各種マスタデータを取得します。
 
     **利用可能な collection_name:**
-    - `_M_prefecture` 都道府県マスタ（47都道府県）
+    - `_M_pref` 都道府県マスタ（47都道府県）
     - `_M_city` 市区町村マスタ（全国市区町村）
     - `_M_calendar` カレンダーマスタ（祝日・平日判定、1950年〜）
 
-    **_M_prefecture のレスポンスフィールド:**
+    **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
     - `name` (string) 都道府県名
 
@@ -71,7 +71,7 @@ async def get_master(collection_name: str, request: Request):
     - `weekday` (任意) 曜日コードで絞込（0=月〜6=日）。例: `0`
 
     **URL例:**
-    - `/master/_M_prefecture` 都道府県一覧
+    - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
     - `/master/_M_calendar?year=2026` 2026年のカレンダー
     - `/master/_M_calendar?year=2026&holiday_only=true` 2026年の祝日一覧
