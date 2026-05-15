@@ -51,21 +51,34 @@ def guide():
     return HTMLResponse(GUIDE_HTML.read_text(encoding="utf-8"))
 
 
-@app.get("/master/{collection_name}")
-def get_master(collection_name: str):
-    data = get_stats(collection_name, category="master")
-    return {"collection": collection_name, "updated_at": str(datetime.now()), "count": len(data), "data": data}
-
-
-@app.get("/stats/{collection_name}")
+@app.get("/stats/{collection_name}", summary="統計データ取得（汎用）")
 def get_collection(collection_name: str):
+    """
+    GCSに保存された統計データを取得します。
+    各データソース専用のエンドポイントが存在する場合はそちらを使用してください。
+    """
     data = get_stats(collection_name)
     return {"collection": collection_name, "updated_at": str(datetime.now()), "count": len(data), "data": data}
 
 
-@app.post("/collect")
+@app.post("/collect", summary="データ収集トリガー")
 async def trigger_collection(background_tasks: BackgroundTasks, target: str = None):
-    # データ収集をバックグラウンドでトリガーする
+    """
+    データ収集をバックグラウンドで開始します。
+
+    **クエリパラメータ:**
+    - `target` (任意) 収集対象を指定。省略時は全ソースを一括収集します
+
+    **利用可能な target 値:**
+    - `d_kanko` デジタル観光統計（毎月第2木曜）
+    - `n_roudou` 長野労働局 求人統計（毎月末）
+    - `enecho_gasoline` 資源エネルギー庁 ガソリン価格（毎週水曜、GitHub Actions経由）
+    - `jma_nagano` 気象庁 長野県天気予報（毎朝6:00 JST）
+
+    **URL例:**
+    - `/collect` 全ソース一括収集
+    - `/collect?target=jma_nagano` 天気予報のみ収集
+    """
     if target is None:
         background_tasks.add_task(run_all_collections)
         return {"message": "全データソースの収集を開始しました", "timestamp": str(datetime.now())}
