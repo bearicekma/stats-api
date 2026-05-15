@@ -12,7 +12,7 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
 
@@ -28,6 +28,7 @@ app.include_router(enecho.router)
 app.include_router(jma.router)
 app.include_router(edinet.router)
 app.include_router(master.router)
+app.include_router(kabuka.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 

@@ -12,3 +12,4 @@ xmltodict
 python-dateutil
 openpyxl
 orjson
+yfinance
