@@ -86,12 +86,10 @@ EMOJI_FALLBACK = {"1": "☀️", "2": "☁️", "3": "🌧", "4": "❄️"}
 
 
 def _to_float(val: str):
-    """空文字・Noneを受け取りfloatまたはNoneを返す"""
     return float(val) if val and val.strip() else None
 
 
 def _to_int(val: str):
-    """空文字・Noneを受け取りintまたはNoneを返す"""
     return int(val) if val and val.strip() else None
 
 
@@ -119,16 +117,14 @@ def _parse(raw: list) -> pd.DataFrame:
     retrieved_at = now_jst.isoformat()
 
     # ── 3日予報を整理する ──────────────────────────────────────────
-    s0       = raw[0]["timeSeries"][0]   # 天気コード・テキスト・風（ゾーン別）
-    s1       = raw[0]["timeSeries"][1]   # 降水確率（6時間単位、ゾーン別）
-    s2       = raw[0]["timeSeries"][2]   # 気温（地点別）
-    s0_dates = [d[:10] for d in s0["timeDefines"]]  # ['今日', '明日', '明後日']
+    s0       = raw[0]["timeSeries"][0]
+    s1       = raw[0]["timeSeries"][1]
+    s2       = raw[0]["timeSeries"][2]
+    s0_dates = [d[:10] for d in s0["timeDefines"]]
 
-    # ゾーン別に天気・風を辞書化する
     short_zone = {area["area"]["name"]: area for area in s0["areas"]}
 
     # ゾーン別の降水確率（今日・明日）を集計する
-    # 6時間スロット: [今日12-18h, 今日18-24h, 明日00-06h, 明日06-12h, 明日12-18h, 明日18-24h]
     short_pop = {}
     for area in s1["areas"]:
         zname   = ZONE_CODE_NAME.get(area["area"]["code"], "")
@@ -137,21 +133,19 @@ def _parse(raw: list) -> pd.DataFrame:
         tmrw_p  = max([int(p) for p in pops[2:6] if p.strip()], default=None)
         short_pop[zname] = {"today": today_p, "tomorrow": tmrw_p}
 
-    # 地点別気温を整理する（4時刻: 今日high, 今日low, 明日low, 明日high）
+    # 地点別気温を整理する
     short_temps = {}
     for area in s2["areas"]:
         t = area.get("temps", [])
         short_temps[area["area"]["name"]] = {
-            "today_max": _to_float(t[1]) if len(t) > 1 else None,  # t[1]=今日の最高
-            "today_min": _to_float(t[0]) if len(t) > 0 else None,  # t[0]=今日の最低
-            "tmrw_min":  _to_float(t[2]) if len(t) > 2 else None,  # t[2]=明日の最低
-            "tmrw_max":  _to_float(t[3]) if len(t) > 3 else None,  # t[3]=明日の最高
+            "tmrw_min": _to_float(t[2]) if len(t) > 2 else None,
+            "tmrw_max": _to_float(t[3]) if len(t) > 3 else None,
         }
 
     # ── 週間予報を整理する ──────────────────────────────────────────
-    w0      = raw[1]["timeSeries"][0]   # 天気コード・降水確率・信頼度（長野県全体）
-    w1      = raw[1]["timeSeries"][1]   # 最高・最低気温（長野のみ）
-    w_dates = [d[:10] for d in w0["timeDefines"]]  # 7日分（明日〜）
+    w0      = raw[1]["timeSeries"][0]
+    w1      = raw[1]["timeSeries"][1]
+    w_dates = [d[:10] for d in w0["timeDefines"]]
     w_area  = w0["areas"][0]
     w_codes = w_area["weatherCodes"]
     w_pops  = w_area["pops"]
@@ -164,7 +158,6 @@ def _parse(raw: list) -> pd.DataFrame:
     # ── レコードを組み立てる ────────────────────────────────────────
     records  = []
     tmrw_str = s0_dates[1] if len(s0_dates) > 1 else ""
-    daft_str = s0_dates[2] if len(s0_dates) > 2 else ""
 
     def make_record(date_str, loc, code, text, tmax, tmin, pop, rel, wind):
         return {
@@ -181,25 +174,31 @@ def _parse(raw: list) -> pd.DataFrame:
             "retrieved_at": retrieved_at,
         }
 
-    # 今日（3日予報 index=0 のみ）
+    # 今日（3日予報 index=0）
+    # ③ 気温はNoneにする（前日の週間予報でGCSに保存済みの値が正確なため）
     for loc, info in LOCATIONS.items():
         zname = info["wind_zone"]
         zarea = short_zone.get(zname, {})
         code  = zarea.get("weatherCodes", [""])[0]
-        text  = zarea.get("weathers",     [""])[0] or WEATHER_CODE_MAP.get(code, "")
+        # ⑤ 全角スペースを半角に変換する
+        text  = (zarea.get("weathers", [""])[0] or WEATHER_CODE_MAP.get(code, "")).replace("\u3000", " ")
         wind  = _clean_wind(zarea.get("winds", [None])[0])
         pop   = short_pop.get(zname, {}).get("today")
-        st    = short_temps.get(loc, {})
         records.append(make_record(
             today_str, loc, code, text,
-            st.get("today_max"), st.get("today_min"),
+            None, None,  # ⑦ 今日の気温はNone（GCS既存値を保持）
             pop, None, wind
         ))
 
     # 明日〜今日+6（週間予報 index=0〜5）
     for i, date_str in enumerate(w_dates[:6]):
+        # ③ 今日と同じ日付が週間予報に含まれる場合はスキップする
+        if date_str == today_str:
+            continue
+
         code     = w_codes[i]
-        text     = WEATHER_CODE_MAP.get(code, code)
+        # ⑤ 全角スペースを半角に変換する
+        text     = WEATHER_CODE_MAP.get(code, code).replace("\u3000", " ")
         w_pop    = _to_int(w_pops[i])
         rel      = w_rels[i].strip() or None if w_rels[i] else None
         w_nagano_max = _to_float(w_tmax[i])
@@ -209,21 +208,17 @@ def _parse(raw: list) -> pd.DataFrame:
             zname = info["wind_zone"]
             zarea = short_zone.get(zname, {})
 
-            # 風: 3日予報の範囲内なら取得、それ以外はNull
             wind = None
             if date_str in s0_dates:
                 si    = s0_dates.index(date_str)
                 winds = zarea.get("winds", [])
                 wind  = _clean_wind(winds[si] if si < len(winds) else None)
 
-            # 降水確率: 明日はゾーン別を優先、それ以外は県全体
             if date_str == tmrw_str:
                 pop = short_pop.get(zname, {}).get("tomorrow") or w_pop
             else:
                 pop = w_pop
 
-            # 気温: 明日は地点別（3日予報）を優先
-            #        明後日以降は長野のみ週間予報、他地点はNull
             if date_str == tmrw_str:
                 st   = short_temps.get(loc, {})
                 tmax = st.get("tmrw_max") or (w_nagano_max if loc == "長野" else None)
@@ -235,37 +230,52 @@ def _parse(raw: list) -> pd.DataFrame:
             records.append(make_record(date_str, loc, code, text, tmax, tmin, pop, rel, wind))
 
     df = pd.DataFrame(records)
-    # NaN→Noneに変換する（JSONシリアライズ対策）
-    # pandasはNullをfloat('nan')で表現するが、JSONにnanは存在しないためNoneに統一する
+    # ③ new_df内の重複を排除する（target_date×locationで最初の行を保持）
+    df = df.drop_duplicates(subset=["target_date", "location"], keep="first")
     return df.where(pd.notna(df), None)
 
 
 def _upsert_to_gcs(new_df: pd.DataFrame) -> None:
     """(target_date, location)をキーにupsertしてGCSに保存する（蓄積型）"""
-    gcs    = storage.Client()
-    bucket = gcs.bucket(BUCKET_NAME)
-    blob   = bucket.blob(GCS_PATH)
+    gcs       = storage.Client()
+    bucket    = gcs.bucket(BUCKET_NAME)
+    blob      = bucket.blob(GCS_PATH)
+    today_str = datetime.now(JST).date().isoformat()
 
     if blob.exists():
-        # 既存データを読み込む
         buf = io.BytesIO()
         blob.download_to_file(buf)
         buf.seek(0)
         existing = pd.read_parquet(buf)
 
-        # 新データと重複するキーを既存から除外する
+        # ⑦ 今日分の気温はGCS既存値を優先する（週間予報の値が正確なため）
+        existing_today = existing[
+            existing["target_date"].astype(str) == today_str
+        ].set_index("location")
+
+        today_mask = new_df["target_date"].astype(str) == today_str
+        for idx in new_df[today_mask].index:
+            loc = new_df.loc[idx, "location"]
+            if loc in existing_today.index:
+                ex_max = existing_today.loc[loc, "temp_max"]
+                ex_min = existing_today.loc[loc, "temp_min"]
+                if pd.notna(ex_max):
+                    new_df.loc[idx, "temp_max"] = ex_max
+                if pd.notna(ex_min):
+                    new_df.loc[idx, "temp_min"] = ex_min
+
+        # 新データと重複するキーを既存から除外して結合する
         new_keys = set(zip(new_df["target_date"].astype(str), new_df["location"]))
         existing["_key"] = existing["target_date"].astype(str) + "_" + existing["location"]
-        kept     = existing[~existing["_key"].isin(
+        kept   = existing[~existing["_key"].isin(
             {f"{d}_{l}" for d, l in new_keys}
         )].drop("_key", axis=1)
-        result   = pd.concat([kept, new_df], ignore_index=True)
+        result = pd.concat([kept, new_df], ignore_index=True)
     else:
         result = new_df
 
     result = result.sort_values(["target_date", "location"]).reset_index(drop=True)
 
-    # GCSに書き戻す
     table = pa.Table.from_pandas(result, preserve_index=False)
     buf   = io.BytesIO()
     pq.write_table(table, buf)
@@ -276,11 +286,15 @@ def _upsert_to_gcs(new_df: pd.DataFrame) -> None:
 def _format_line_message(df: pd.DataFrame) -> str:
     """長野地点の7日分予報をLINE通知用テキストにフォーマットする"""
     nagano  = df[df["location"] == "長野"].sort_values("target_date")
-    pub     = df["published_at"].iloc[0]
-    pub_str = datetime.fromisoformat(pub).strftime("%Y/%m/%d（%a）%H:%M")
+    # ⑥ 収集時点の時刻を表示する
+    ret     = df["retrieved_at"].iloc[0]
     wd_ja   = ["月", "火", "水", "木", "金", "土", "日"]
+    # ② 曜日をwd_jaで日本語化する
+    ret_dt  = datetime.fromisoformat(ret)
+    ret_wd  = wd_ja[ret_dt.weekday()]
+    ret_str = ret_dt.strftime(f"%Y/%m/%d（{ret_wd}）%H:%M")
 
-    lines = ["☀️ 長野の1週間天気予報", f"{pub_str}発表", ""]
+    lines = ["☀️ 長野の1週間天気予報", f"{ret_str}取得", ""]
 
     for _, row in nagano.iterrows():
         td      = pd.to_datetime(row["target_date"])
@@ -290,27 +304,27 @@ def _format_line_message(df: pd.DataFrame) -> str:
         emoji   = WEATHER_EMOJI.get(code, EMOJI_FALLBACK.get(code[:1], "🌀"))
         weather = row["weather"] or ""
 
-        # 気温（一桁の場合にスペースで右揃えする）
+        # ④ 幅揃えを廃止してシンプルに表示する
         tmax = row["temp_max"]
         tmin = row["temp_min"]
         if pd.notna(tmax) and pd.notna(tmin):
-            temp_s = f"{int(tmax):>2}/{int(tmin):>2}℃"
+            temp_s = f"{int(tmax)}/{int(tmin)}℃"
         elif pd.notna(tmax):
-            temp_s = f"{int(tmax):>2}/--℃"
+            temp_s = f"{int(tmax)}/--℃"
         else:
             temp_s = "--/--℃"
 
-        # 降水確率
+        # ④ 降水確率の幅揃えを廃止する
         pop   = row["precip_prob"]
-        pop_s = f"💧{int(pop):>3}%" if pd.notna(pop) else "💧 --%"
+        pop_s = f"💧{int(pop)}%" if pd.notna(pop) else "💧--%"
 
-        # 確度（今日・明日はデータなしのため省略）
         rel   = row["reliability"]
         rel_s = f"  確度{rel}" if pd.notna(rel) and rel else ""
 
         lines.append(f"{date_s} {emoji} {weather}  {temp_s}  {pop_s}{rel_s}")
 
-    return "\\n".join(lines)
+    # ① "\n"で正しく改行する
+    return "\n".join(lines)
 
 
 def _send_line(message: str) -> None:
@@ -332,10 +346,10 @@ def _send_line(message: str) -> None:
 
 def collect_jma_nagano() -> int:
     """気象庁APIから取得・GCS保存・LINE通知を一括実行するメイン関数"""
-    raw    = _fetch()
-    df     = _parse(raw)
+    raw = _fetch()
+    df  = _parse(raw)
     _upsert_to_gcs(df)
-    msg    = _format_line_message(df)
+    msg = _format_line_message(df)
     _send_line(msg)
     print(f"✅ jma/nagano 収集完了: {len(df)}件")
     return len(df)
