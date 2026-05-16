@@ -74,11 +74,35 @@ def convert_row(row: dict, code_map: dict) -> dict:
 
 # ── エンドポイント ──────────────────────────────────────────
 
-@router.get("/meta/{stats_data_id}")
+@router.get("/meta/{stats_data_id}", summary="統計表のメタ情報・フィルタ後件数")
 async def estat_meta(stats_data_id: str, request: Request):
-    # 統計表のパラメータ一覧と、フィルタ条件を反映した件数・推定ページ数を返す
-    # クエリパラメータは /pass と同じ条件を渡すことで取得前に重さを見積もれる
-    # 例: /estat/meta/0003427113?cdArea=13A01&cdTimeFrom=2020000000
+    """
+    e-Stat統計表のパラメータ一覧と、フィルタ条件を反映した件数・推定ページ数を返します。
+
+    `/pass` で実際に取得する前に、クエリの重さ（件数・ページ数）を確認できます。
+
+    **パスパラメータ:**
+    - `stats_data_id` (str) e-Statの統計表ID。例: 0003427113（消費者物価指数）
+
+    **クエリパラメータ（任意・/pass と同じ条件を指定可能）:**
+    - `cdArea` (str) 地域コード。カンマ区切りで複数指定可。例: 13A01
+    - `cdCat01` (str) 分類事項01のコード
+    - `cdTime` (str) 時間軸コード
+    - `cdTimeFrom` (str) 時間軸の開始。例: 2020000000
+    - `cdTimeTo` (str) 時間軸の終了
+    - その他 e-Stat getStatsData が受け付ける絞り込みパラメータ
+
+    **レスポンス:**
+    - `stats_data_id` (str) 統計表ID
+    - `applied_filters` (object) 適用されたフィルタ条件のエコーバック
+    - `total_number` (str) フィルタ後の総件数。例: 12,480 件
+    - `estimated_pages` (int) /pass が取得するページ数の見積もり（1ページ=10万件）
+    - `parameters` (array) 指定可能なパラメータと選択肢の一覧
+
+    **使用例:**
+    - /estat/meta/0003427113 … 全件の件数とパラメータ一覧
+    - /estat/meta/0003427113?cdArea=13A01&cdTimeFrom=2020000000 … 絞り込み後の件数
+    """
     app_id = os.environ["ESTAT_APP_ID"]
 
     # フィルタ条件（クエリパラメータ）を取り出す
@@ -141,11 +165,38 @@ async def estat_meta(stats_data_id: str, request: Request):
     }
 
 
-@router.get("/pass/{stats_data_id}")
+@router.get("/pass/{stats_data_id}", summary="統計データ取得（パススルー・名称変換付き）")
 async def estat_pass(stats_data_id: str, request: Request):
-    # e-Stat APIを並列先読みしつつメモリ一定でストリーム返却する
-    # URLのクエリパラメータをそのままe-Stat APIに転送する汎用設計
-    # 例: /estat/pass/0003427113?cdArea=00000,13A01&cdTimeFrom=2024000000
+    """
+    e-Stat統計表のデータを取得し、コードを日本語名称に変換してJSONで返します。
+
+    並列先読みでメモリを一定に保ちながらストリーミング送信するため、大量データにも対応します。
+    Power Query / Excel での取り込みを想定した汎用エンドポイントです。
+
+    **パスパラメータ:**
+    - `stats_data_id` (str) e-Statの統計表ID。例: 0003427113（消費者物価指数）
+
+    **クエリパラメータ（任意・e-Stat getStatsData にそのまま転送）:**
+    - `cdArea` (str) 地域コード。カンマ区切りで複数指定可。例: 00000,13A01
+    - `cdCat01` (str) 分類事項01のコード
+    - `cdTimeFrom` (str) 時間軸の開始。例: 2024000000
+    - `cdTimeTo` (str) 時間軸の終了
+    - その他 e-Stat getStatsData が受け付ける絞り込みパラメータ
+
+    **レスポンス（JSONストリーミング）:**
+    - `stats_data_id` (str) 統計表ID
+    - `fetched_at` (str) 取得日時
+    - `total_number` (int) 総件数
+    - `data` (array) コードを名称変換したデータ行（`値` は数値型に変換）
+    - `count` (int) 実際に送信した件数
+
+    **注意:**
+    - 大量データ（数十万件以上）は取得に時間がかかります。事前に /estat/meta/{stats_data_id} で件数確認を推奨します
+    - 数百万件規模はパススルーに不向きです（事前収集方式の検討を推奨）
+
+    **使用例:**
+    - /estat/pass/0003427113?cdArea=13A01&cdTimeFrom=2020000000
+    """
     app_id = os.environ["ESTAT_APP_ID"]
 
     # ベースパラメータにリクエストのクエリパラメータを上書きマージする
