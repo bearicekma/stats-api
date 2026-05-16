@@ -1,5 +1,5 @@
 # e-Stat APIエンドポイント
-# /estat/meta/{stats_data_id} : メタ情報・総件数
+# /estat/meta/{stats_data_id} : メタ情報・フィルタ後件数・推定ページ数
 # /estat/pass/{stats_data_id} : パススルー（並列先読み＋メモリ一定のストリーミング）
 
 from fastapi           import APIRouter, Request
@@ -75,14 +75,18 @@ def convert_row(row: dict, code_map: dict) -> dict:
 # ── エンドポイント ──────────────────────────────────────────
 
 @router.get("/meta/{stats_data_id}")
-async def estat_meta(stats_data_id: str):
-    # e-Statの統計表のメタ情報（パラメータ一覧）と総件数を返す
-    # 例: /estat/meta/0003427113
+async def estat_meta(stats_data_id: str, request: Request):
+    # 統計表のパラメータ一覧と、フィルタ条件を反映した件数・推定ページ数を返す
+    # クエリパラメータは /pass と同じ条件を渡すことで取得前に重さを見積もれる
+    # 例: /estat/meta/0003427113?cdArea=13A01&cdTimeFrom=2020000000
     app_id = os.environ["ESTAT_APP_ID"]
+
+    # フィルタ条件（クエリパラメータ）を取り出す
+    applied_filters = dict(request.query_params)
 
     async with httpx.AsyncClient() as client:
 
-        # メタ情報（パラメータ一覧）を取得する
+        # パラメータ一覧を取得する（絞り込みと無関係なため全件のまま）
         meta_response = await client.get(
             "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
             params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J"},
@@ -90,10 +94,16 @@ async def estat_meta(stats_data_id: str):
         )
         meta_response.raise_for_status()
 
-        # 総件数を確認するため1件だけ取得する
+        # フィルタ後件数を確認するため1件だけ取得する
+        # クエリパラメータを転送し、limit/startPositionは最小値で強制上書きする
+        count_params = {"appId": app_id, "statsDataId": stats_data_id, "lang": "J"}
+        count_params.update(applied_filters)
+        count_params["limit"]         = 1
+        count_params["startPosition"] = 1
+
         count_response = await client.get(
             "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-            params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J", "limit": 1, "startPosition": 1},
+            params=count_params,
             timeout=30
         )
         count_response.raise_for_status()
@@ -116,13 +126,18 @@ async def estat_meta(stats_data_id: str):
             "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
         })
 
-    # 総件数を取得する（TOTAL_NUMBERはRESULT_INFに含まれる）
+    # フィルタ後件数を取得する（TOTAL_NUMBERは絞り込み条件を反映する）
     total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
 
+    # /pass が取得するページ数を推定する（重さの目安）
+    estimated_pages = (total + ESTAT_LIMIT - 1) // ESTAT_LIMIT
+
     return {
-        "stats_data_id": stats_data_id,
-        "total_number":  f"{total:,} 件",
-        "parameters":    parameters
+        "stats_data_id":   stats_data_id,
+        "applied_filters": applied_filters,
+        "total_number":    f"{total:,} 件",
+        "estimated_pages": estimated_pages,
+        "parameters":      parameters
     }
 
 
