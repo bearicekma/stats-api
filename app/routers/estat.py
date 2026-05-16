@@ -1,10 +1,11 @@
 # e-Stat APIエンドポイント
 # /estat/meta/{stats_data_id} : メタ情報・総件数
-# /estat/pass/{stats_data_id} : パススルー（コード→名称変換付き・並列取得で高速化）
+# /estat/pass/{stats_data_id} : パススルー（並列先読み＋メモリ一定のストリーミング）
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from datetime          import datetime
+from collections       import deque
 import asyncio
 import httpx
 import orjson
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/estat", tags=["estat"])
 # 1リクエストあたりのe-Stat取得上限件数
 ESTAT_LIMIT = 100000
 
-# e-Stat APIへの同時リクエスト数（過負荷を避けるため3に制限）
+# e-Stat APIへの同時リクエスト数 兼 先読みウィンドウ幅（過負荷・メモリ抑制のため3）
 ESTAT_CONCURRENCY = 3
 
 # e-Stat データ取得APIのエンドポイント
@@ -127,7 +128,7 @@ async def estat_meta(stats_data_id: str):
 
 @router.get("/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
-    # e-Stat APIを並列ページ取得で高速に全件取得し、コードを名称に変換して返す
+    # e-Stat APIを並列先読みしつつメモリ一定でストリーム返却する
     # URLのクエリパラメータをそのままe-Stat APIに転送する汎用設計
     # 例: /estat/pass/0003427113?cdArea=00000,13A01&cdTimeFrom=2024000000
     app_id = os.environ["ESTAT_APP_ID"]
@@ -142,8 +143,7 @@ async def estat_pass(stats_data_id: str, request: Request):
     base_params.update(dict(request.query_params))
 
     # ── 先行コール ───────────────────────────────────────
-    # limit=1 で叩き、total_number と class_info（変換辞書の元）を軽量取得する
-    # 応答が数百バイトに収まるため即座に返る
+    # limit=1 で total_number と class_info（変換辞書の元）を軽量取得する
     async with httpx.AsyncClient(timeout=60) as client:
         lead_params = dict(base_params)
         lead_params["limit"]         = 1
@@ -154,7 +154,7 @@ async def estat_pass(stats_data_id: str, request: Request):
         statistical_data = lead_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
         total_number     = int(statistical_data["RESULT_INF"]["TOTAL_NUMBER"])
 
-        # コード→名称の変換辞書を構築する（class_infoは先行コールから取得）
+        # コード→名称の変換辞書を構築する
         class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
         if isinstance(class_info, dict):
             class_info = [class_info]
@@ -163,35 +163,11 @@ async def estat_pass(stats_data_id: str, request: Request):
     # ── ページ境界を計算する ─────────────────────────────
     # 例: total=250000, LIMIT=100000 → startPosition = [1, 100001, 200001]
     start_positions = list(range(1, total_number + 1, ESTAT_LIMIT))
+    fetched_at      = str(datetime.now())
 
-    # ── 全ページを並列取得する ───────────────────────────
-    # Semaphoreで同時実行数をESTAT_CONCURRENCYに制限しe-Statへの過負荷を防ぐ
-    semaphore = asyncio.Semaphore(ESTAT_CONCURRENCY)
-
-    async def fetch_page(client: httpx.AsyncClient, start_pos: int) -> list:
-        # 1ページ分を取得しVALUE配列を返す
-        # metaGetFlg=N で不要なメタデータ送信を抑制し応答を軽量化する
-        async with semaphore:
-            page_params = dict(base_params)
-            page_params["startPosition"] = start_pos
-            page_params["metaGetFlg"]    = "N"
-
-            resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
-            resp.raise_for_status()
-            return resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        # asyncio.gatherは渡した順序どおりに結果を返すためページ順序が保たれる
-        tasks        = [fetch_page(client, sp) for sp in start_positions]
-        pages_values = await asyncio.gather(*tasks)
-
-    # ── ストリーム送信 ───────────────────────────────────
-    # 全ページ取得済みだが、巨大な単一文字列を作らずorjsonで1行ずつ送出する
-    # （sync generatorはStarletteがthreadpoolで実行するためイベントループを塞がない）
-    fetched_at = str(datetime.now())
-
-    def stream_json():
-        # ヘッダー部分
+    # ── ストリーム送信（並列先読み＋メモリ一定） ─────────
+    async def stream_json():
+        # ヘッダー部分を送出する
         yield (
             '{"stats_data_id":"' + stats_data_id + '",'
             '"fetched_at":"'     + fetched_at    + '",'
@@ -199,16 +175,59 @@ async def estat_pass(stats_data_id: str, request: Request):
             '"data":['
         ).encode("utf-8")
 
-        # 各ページの各行を変換しながら逐次送出する
         total_sent = 0
         first_row  = True
-        for values in pages_values:
-            for row in values:
-                prefix    = b"" if first_row else b","
-                first_row = False
-                # orjson.dumpsはbytesを返し、非ASCIIをUTF-8でそのまま出力する
-                yield prefix + orjson.dumps(convert_row(row, code_map))
-                total_sent += 1
+
+        async with httpx.AsyncClient(timeout=300) as client:
+
+            async def fetch_page(start_pos: int) -> list:
+                # 1ページ分を取得しVALUE配列を返す
+                # metaGetFlg=N で不要なメタデータ送信を抑制し応答を軽量化する
+                page_params = dict(base_params)
+                page_params["startPosition"] = start_pos
+                page_params["metaGetFlg"]    = "N"
+
+                resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
+                resp.raise_for_status()
+                return resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+
+            in_flight = deque()   # 先読み中タスクのキュー（最大ESTAT_CONCURRENCY）
+            next_idx  = 0
+
+            # 先読みウィンドウを初期充填する（最大ESTAT_CONCURRENCYページ並列）
+            while next_idx < len(start_positions) and len(in_flight) < ESTAT_CONCURRENCY:
+                in_flight.append(asyncio.create_task(fetch_page(start_positions[next_idx])))
+                next_idx += 1
+
+            try:
+                while in_flight:
+                    # 最古のページを順番に待つ（出力順序を保証）
+                    values = await in_flight.popleft()
+
+                    # 次ページの取得を先行開始しウィンドウを補充する
+                    if next_idx < len(start_positions):
+                        in_flight.append(asyncio.create_task(fetch_page(start_positions[next_idx])))
+                        next_idx += 1
+
+                    # このページを変換しながら逐次送出する
+                    for i, row in enumerate(values):
+                        prefix    = b"" if first_row else b","
+                        first_row = False
+                        # orjson.dumpsはbytesを返し非ASCIIをUTF-8でそのまま出力する
+                        yield prefix + orjson.dumps(convert_row(row, code_map))
+                        total_sent += 1
+
+                        # 8192行ごとにループへ制御を返す
+                        # （送信バイトの実送出・次ページ先読みを進めるため）
+                        if (i & 0x1FFF) == 0:
+                            await asyncio.sleep(0)
+
+                    # 送信済みページのメモリを即解放する
+                    del values
+            finally:
+                # クライアント切断時など、先読み中タスクをキャンセルしリークを防ぐ
+                for task in in_flight:
+                    task.cancel()
 
         # フッターに実際の送信件数を付加して閉じる
         yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
