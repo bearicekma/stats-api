@@ -2,6 +2,7 @@
 
 from fastapi           import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse, ORJSONResponse
+from fastapi.middleware.gzip import GZipMiddleware   # ← 追加: gzip圧縮用
 from pathlib           import Path
 from datetime          import datetime
 from app.database      import get_stats
@@ -15,6 +16,9 @@ from app.collector     import (
 from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
+
+# ← 追加: レスポンスをgzip圧縮する（1KB未満は圧縮効果が薄いため対象外）
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 各データソースのルーターを登録する
 app.include_router(d_kanko.router)

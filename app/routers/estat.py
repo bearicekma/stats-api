@@ -1,18 +1,25 @@
 # e-Stat APIエンドポイント
 # /estat/meta/{stats_data_id} : メタ情報・総件数
-# /estat/pass/{stats_data_id} : パススルー（コード→名称変換付き）
+# /estat/pass/{stats_data_id} : パススルー（コード→名称変換付き・並列取得で高速化）
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from datetime          import datetime
+import asyncio
 import httpx
-import json
+import orjson
 import os
 
 router = APIRouter(prefix="/estat", tags=["estat"])
 
 # 1リクエストあたりのe-Stat取得上限件数
 ESTAT_LIMIT = 100000
+
+# e-Stat APIへの同時リクエスト数（過負荷を避けるため3に制限）
+ESTAT_CONCURRENCY = 3
+
+# e-Stat データ取得APIのエンドポイント
+ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 
 
 # ── ユーティリティ関数 ──────────────────────────────────────
@@ -108,7 +115,7 @@ async def estat_meta(stats_data_id: str):
             "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
         })
 
-    # 総件数を取得する（TOTAL_NUMBERはDATALIST_INFに含まれる）
+    # 総件数を取得する（TOTAL_NUMBERはRESULT_INFに含まれる）
     total = int(count_response.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["RESULT_INF"]["TOTAL_NUMBER"])
 
     return {
@@ -120,75 +127,90 @@ async def estat_meta(stats_data_id: str):
 
 @router.get("/pass/{stats_data_id}")
 async def estat_pass(stats_data_id: str, request: Request):
-    # e-Stat APIをページネーションで全件取得しコードを名称に変換して返す
+    # e-Stat APIを並列ページ取得で高速に全件取得し、コードを名称に変換して返す
     # URLのクエリパラメータをそのままe-Stat APIに転送する汎用設計
     # 例: /estat/pass/0003427113?cdArea=00000,13A01&cdTimeFrom=2024000000
     app_id = os.environ["ESTAT_APP_ID"]
 
     # ベースパラメータにリクエストのクエリパラメータを上書きマージする
-    params = {
+    base_params = {
         "appId":       app_id,
         "statsDataId": stats_data_id,
         "lang":        "J",
         "limit":       ESTAT_LIMIT,
     }
-    params.update(dict(request.query_params))
+    base_params.update(dict(request.query_params))
 
-    async def stream_json():
-        # ページ単位で取得・変換・送信することでメモリ使用量を最小化する
-        start_position = 1
-        class_info     = None
-        code_map       = None
-        total_number   = 0
-        total_sent     = 0
-        first_row      = True
-        fetched_at     = str(datetime.now())
+    # ── 先行コール ───────────────────────────────────────
+    # limit=1 で叩き、total_number と class_info（変換辞書の元）を軽量取得する
+    # 応答が数百バイトに収まるため即座に返る
+    async with httpx.AsyncClient(timeout=60) as client:
+        lead_params = dict(base_params)
+        lead_params["limit"]         = 1
+        lead_params["startPosition"] = 1
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            while True:
-                params["startPosition"] = start_position
+        lead_resp = await client.get(ESTAT_GET_STATS_DATA, params=lead_params)
+        lead_resp.raise_for_status()
+        statistical_data = lead_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
+        total_number     = int(statistical_data["RESULT_INF"]["TOTAL_NUMBER"])
 
-                response = await client.get(
-                    "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-                    params=params,
-                )
-                response.raise_for_status()
-                raw_json         = response.json()
-                statistical_data = raw_json["GET_STATS_DATA"]["STATISTICAL_DATA"]
-                result_inf       = statistical_data["RESULT_INF"]
-                total_number     = int(result_inf["TOTAL_NUMBER"])
-                to_number        = int(result_inf["TO_NUMBER"])
-                values           = statistical_data["DATA_INF"]["VALUE"]
+        # コード→名称の変換辞書を構築する（class_infoは先行コールから取得）
+        class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
+        if isinstance(class_info, dict):
+            class_info = [class_info]
+        code_map = build_code_to_name_map(class_info)
 
-                # 最初のページでclass_infoを取得しヘッダーJSONを送信する
-                if class_info is None:
-                    class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
-                    if isinstance(class_info, dict):
-                        class_info = [class_info]
-                    code_map = build_code_to_name_map(class_info)
+    # ── ページ境界を計算する ─────────────────────────────
+    # 例: total=250000, LIMIT=100000 → startPosition = [1, 100001, 200001]
+    start_positions = list(range(1, total_number + 1, ESTAT_LIMIT))
 
-                    yield (
-                        '{"stats_data_id":"' + stats_data_id + '",'
-                        '"fetched_at":"'     + fetched_at    + '",'
-                        '"total_number":'    + str(total_number) + ','
-                        '"data":['
-                    ).encode("utf-8")
+    # ── 全ページを並列取得する ───────────────────────────
+    # Semaphoreで同時実行数をESTAT_CONCURRENCYに制限しe-Statへの過負荷を防ぐ
+    semaphore = asyncio.Semaphore(ESTAT_CONCURRENCY)
 
-                # このページ分を変換して即座に送信する
-                for row in values:
-                    prefix = b"" if first_row else b","
-                    first_row = False
-                    yield prefix + json.dumps(
-                        convert_row(row, code_map), ensure_ascii=False
-                    ).encode("utf-8")
-                    total_sent += 1
+    async def fetch_page(client: httpx.AsyncClient, start_pos: int) -> list:
+        # 1ページ分を取得しVALUE配列を返す
+        # metaGetFlg=N で不要なメタデータ送信を抑制し応答を軽量化する
+        async with semaphore:
+            page_params = dict(base_params)
+            page_params["startPosition"] = start_pos
+            page_params["metaGetFlg"]    = "N"
 
-                # 全件取得完了の確認
-                if to_number >= total_number:
-                    break
-                start_position = to_number + 1
+            resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
+            resp.raise_for_status()
+            return resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
 
-        # フッターにcount（実際に送信した件数）を付加して閉じる
+    async with httpx.AsyncClient(timeout=300) as client:
+        # asyncio.gatherは渡した順序どおりに結果を返すためページ順序が保たれる
+        tasks        = [fetch_page(client, sp) for sp in start_positions]
+        pages_values = await asyncio.gather(*tasks)
+
+    # ── ストリーム送信 ───────────────────────────────────
+    # 全ページ取得済みだが、巨大な単一文字列を作らずorjsonで1行ずつ送出する
+    # （sync generatorはStarletteがthreadpoolで実行するためイベントループを塞がない）
+    fetched_at = str(datetime.now())
+
+    def stream_json():
+        # ヘッダー部分
+        yield (
+            '{"stats_data_id":"' + stats_data_id + '",'
+            '"fetched_at":"'     + fetched_at    + '",'
+            '"total_number":'    + str(total_number) + ','
+            '"data":['
+        ).encode("utf-8")
+
+        # 各ページの各行を変換しながら逐次送出する
+        total_sent = 0
+        first_row  = True
+        for values in pages_values:
+            for row in values:
+                prefix    = b"" if first_row else b","
+                first_row = False
+                # orjson.dumpsはbytesを返し、非ASCIIをUTF-8でそのまま出力する
+                yield prefix + orjson.dumps(convert_row(row, code_map))
+                total_sent += 1
+
+        # フッターに実際の送信件数を付加して閉じる
         yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
 
     return StreamingResponse(stream_json(), media_type="application/json")
