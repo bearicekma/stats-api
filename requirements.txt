@@ -15,3 +15,4 @@ orjson
 yfinance
 google-cloud-vision
 pymupdf
+python-multipart
