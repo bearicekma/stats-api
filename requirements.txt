@@ -13,3 +13,5 @@ python-dateutil
 openpyxl
 orjson
 yfinance
+google-cloud-vision
+pymupdf

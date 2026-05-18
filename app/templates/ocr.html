@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<!-- OCR WebUI: ファイル選択→プレビュー→OCR実行→結果表示／コピー／TXT・CSV・Excelダウンロード -->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OCR | Stats API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PDF1ページ目プレビュー用（クライアント完結） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-3xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-1">汎用OCR</h1>
+    <p class="text-sm text-slate-500 mb-6">PDF / PNG / JPEG（上限10MB・PDFは20ページまで）</p>
+
+    <!-- アップロード -->
+    <div class="bg-white rounded-xl shadow p-5 mb-4">
+      <input id="file" type="file" accept=".pdf,.png,.jpg,.jpeg"
+             class="block w-full text-sm mb-4">
+      <div id="preview" class="mb-4"></div>
+      <button id="run" disabled
+              class="bg-blue-600 disabled:bg-slate-300 text-white px-5 py-2 rounded-lg">
+        OCR実行
+      </button>
+      <span id="status" class="ml-3 text-sm text-slate-500"></span>
+    </div>
+
+    <!-- 結果 -->
+    <div id="result" class="hidden bg-white rounded-xl shadow p-5">
+      <div id="warn" class="hidden mb-3 text-sm text-amber-700 bg-amber-50 p-2 rounded"></div>
+      <textarea id="text" readonly rows="14"
+                class="w-full text-sm border rounded p-2 font-mono"></textarea>
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button onclick="copyText()"  class="bg-slate-700 text-white px-3 py-1.5 rounded text-sm">コピー</button>
+        <button onclick="dl('txt')"   class="bg-slate-200 px-3 py-1.5 rounded text-sm">TXT</button>
+        <button onclick="dl('csv')"   class="bg-slate-200 px-3 py-1.5 rounded text-sm">CSV</button>
+        <button onclick="dlXlsx()"    class="bg-emerald-600 text-white px-3 py-1.5 rounded text-sm">Excel</button>
+      </div>
+      <table class="w-full text-xs mt-4 border-collapse">
+        <thead><tr class="bg-slate-100 text-left">
+          <th class="p-1">頁</th><th class="p-1">取得元</th><th class="p-1">信頼度</th>
+        </tr></thead>
+        <tbody id="pageTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+let lastResult = null;
+const $ = id => document.getElementById(id);
+
+// ファイル選択時：プレビュー表示（画像=img / PDF=1ページ目をcanvas描画）
+$("file").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  $("preview").innerHTML = "";
+  $("run").disabled = !f;
+  if (!f) return;
+  if (f.type.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(f);
+    img.className = "max-h-64 rounded border";
+    $("preview").appendChild(img);
+  } else if (f.type === "application/pdf") {
+    const buf = await f.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+    const page = await pdf.getPage(1);
+    const vp = page.getViewport({scale: 1});
+    const cv = document.createElement("canvas");
+    cv.className = "max-h-64 rounded border";
+    cv.width = vp.width; cv.height = vp.height;
+    await page.render({canvasContext: cv.getContext("2d"), viewport: vp}).promise;
+    $("preview").appendChild(cv);
+  }
+});
+
+// OCR実行：POST /ocr
+$("run").addEventListener("click", async () => {
+  const f = $("file").files[0];
+  if (!f) return;
+  $("run").disabled = true;
+  $("status").textContent = "処理中…";
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    const r = await fetch("/ocr", {method: "POST", body: fd});
+    const j = await r.json();
+    if (!r.ok) { $("status").textContent = "エラー: " + (j.error || r.status); $("run").disabled=false; return; }
+    lastResult = j;
+    render(j);
+    $("status").textContent = "完了";
+  } catch (err) {
+    $("status").textContent = "通信エラー: " + err;
+  }
+  $("run").disabled = false;
+});
+
+// 結果描画
+function render(j) {
+  $("result").classList.remove("hidden");
+  $("text").value = j.text || "";
+  const tb = $("pageTable");
+  tb.innerHTML = "";
+  j.pages.forEach(p => {
+    const low = j.low_confidence_pages.includes(p.page);
+    tb.insertAdjacentHTML("beforeend",
+      `<tr class="${low ? 'bg-amber-50' : ''}">
+        <td class="p-1">${p.page}</td>
+        <td class="p-1">${p.source}</td>
+        <td class="p-1">${p.confidence ?? '-'}</td></tr>`);
+  });
+  const w = $("warn");
+  if (j.low_confidence_pages.length) {
+    w.textContent = "信頼度が低いページがあります（要目視確認）: " + j.low_confidence_pages.join(", ");
+    w.classList.remove("hidden");
+  } else { w.classList.add("hidden"); }
+}
+
+function copyText() { navigator.clipboard.writeText($("text").value); }
+
+// TXT/CSVはJSONからローカル生成（API再実行なし）。CSVはExcel日本語対応でBOM付与
+function dl(kind) {
+  if (!lastResult) return;
+  let blob, fname;
+  if (kind === "txt") {
+    blob = new Blob([lastResult.text], {type: "text/plain"});
+    fname = "ocr_result.txt";
+  } else {
+    const esc = s => '"' + String(s ?? "").replace(/"/g, '""') + '"';
+    const rows = [["page","source","confidence","text"]]
+      .concat(lastResult.pages.map(p => [p.page, p.source, p.confidence ?? "", p.text]));
+    const csv = "\uFEFF" + rows.map(r => r.map(esc).join(",")).join("\r\n");
+    blob = new Blob([csv], {type: "text/csv"});
+    fname = "ocr_result.csv";
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = fname; a.click();
+}
+
+// ExcelはサーバでJSON→xlsx変換（Vision再実行なし）
+async function dlXlsx() {
+  if (!lastResult) return;
+  const r = await fetch("/ocr/to_xlsx", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(lastResult)
+  });
+  const blob = await r.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "ocr_result.xlsx"; a.click();
+}
+</script>
+</body>
+</html>

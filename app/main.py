@@ -13,7 +13,7 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr  # ← 追加(OCR): ocr
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
 
@@ -33,6 +33,7 @@ app.include_router(jma.router)
 app.include_router(edinet.router)
 app.include_router(master.router)
 app.include_router(kabuka.router)
+app.include_router(ocr.router)   # ← 追加(OCR): /ocr エンドポイント群
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
