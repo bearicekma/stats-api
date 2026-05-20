@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<!-- 文字起こしWebUI: 音声/動画 or YouTube URL → Gemini文字起こし → 要約 -->
+<!-- 機能: 用語集指定、タイムスタンプ付与、用途別要約テンプレート、過去履歴呼び出し -->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文字起こし | Stats API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-3xl mx-auto p-6">
+    <div class="flex items-center justify-between mb-1">
+      <h1 class="text-2xl font-bold">音声・動画文字起こし</h1>
+      <button id="historyBtn" class="text-sm text-blue-600 hover:underline">📜 履歴を表示</button>
+    </div>
+    <p class="text-sm text-slate-500 mb-4">
+      音声/動画ファイル（30MB以下）または YouTube/動画URLから自動文字起こし＋AI整形（Vertex AI Gemini 2.5 Flash）
+    </p>
+
+    <!-- 履歴セクション（折りたたみ式・初期は非表示） -->
+    <div id="historyPanel" class="hidden bg-white rounded-xl shadow p-5 mb-4">
+      <div class="flex justify-between items-center mb-3">
+        <h2 class="text-lg font-semibold">過去の文字起こし（直近20件）</h2>
+        <span id="historyStatus" class="text-xs text-slate-500"></span>
+      </div>
+      <div id="historyList" class="space-y-2 text-sm"></div>
+    </div>
+
+    <!-- 入力カード -->
+    <div class="bg-white rounded-xl shadow p-5 mb-4">
+      <div class="mb-3">
+        <label class="text-sm font-semibold">ファイル（音声/動画）</label>
+        <input id="file" type="file"
+               accept=".mp3,.m4a,.wav,.ogg,.flac,.opus,.aac,.wma,.mp4,.mov,.webm,.avi,.mkv,.m4v"
+               class="block w-full text-sm mt-1">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-semibold">または YouTube/動画URL</label>
+        <input id="url" type="text" placeholder="https://www.youtube.com/watch?v=..."
+               class="block w-full text-sm mt-1 border rounded p-2">
+      </div>
+      <div id="preview" class="mb-3"></div>
+
+      <!-- 追加オプション（折りたたみ式） -->
+      <details class="mb-3">
+        <summary class="text-sm font-semibold cursor-pointer text-slate-700">⚙️ オプション（用語集・タイムスタンプ）</summary>
+        <div class="mt-2 pl-3 border-l-2 border-slate-200 space-y-3">
+          <div>
+            <label class="text-xs text-slate-600 block mb-1">
+              用語集（正確な表記にしたい人名・社名・専門用語等。改行/カンマ区切り）
+            </label>
+            <textarea id="glossary" rows="3"
+                      placeholder="例: 山田太郎、〇〇株式会社、Vertex AI、stats-api"
+                      class="w-full text-sm border rounded p-2"></textarea>
+          </div>
+          <div>
+            <label class="text-xs text-slate-600 flex items-center">
+              <input id="withTimestamps" type="checkbox" class="mr-2">
+              タイムスタンプを30秒ごとに挿入（YouTube字幕は無効化されGeminiで処理）
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <button id="run" disabled
+              class="bg-blue-600 disabled:bg-slate-300 text-white px-5 py-2 rounded-lg">
+        文字起こし実行
+      </button>
+      <span id="status" class="ml-3 text-sm text-slate-500"></span>
+    </div>
+
+    <!-- 文字起こし結果カード -->
+    <div id="result" class="hidden bg-white rounded-xl shadow p-5 mb-4">
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="text-lg font-semibold">文字起こし結果</h2>
+        <span id="meta" class="text-xs text-slate-500"></span>
+      </div>
+      <textarea id="text" rows="14" class="w-full text-sm border rounded p-2"></textarea>
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button onclick="copyText()"    class="bg-slate-700 text-white px-3 py-1.5 rounded text-sm">コピー</button>
+        <button onclick="downloadTxt()" class="bg-slate-200 px-3 py-1.5 rounded text-sm">TXTダウンロード</button>
+      </div>
+    </div>
+
+    <!-- 要約カード -->
+    <div id="summarize" class="hidden bg-white rounded-xl shadow p-5">
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <h2 class="text-lg font-semibold mr-2">要約</h2>
+        <select id="template" class="text-sm border rounded p-1">
+          <option value="default">標準（概要＋論点＋決定事項）</option>
+          <option value="meeting">議事録形式</option>
+          <option value="todo">ToDo抽出</option>
+          <option value="email">報告メール下書き</option>
+          <option value="brief">3行サマリー</option>
+        </select>
+        <select id="model" class="text-sm border rounded p-1">
+          <option value="sonnet">Claude Sonnet 4.5</option>
+          <option value="haiku">Claude Haiku 4.5</option>
+          <option value="gemini">Gemini 2.5 Flash</option>
+        </select>
+        <button id="sumRun" class="bg-emerald-600 text-white px-3 py-1.5 rounded text-sm">要約生成</button>
+        <span id="sumStatus" class="text-xs text-slate-500"></span>
+      </div>
+      <div id="sumResult" class="text-sm whitespace-pre-wrap border rounded p-3 bg-slate-50 min-h-[6rem]"></div>
+      <div class="mt-2">
+        <button onclick="copySummary()" class="bg-slate-200 px-3 py-1.5 rounded text-sm">要約をコピー</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+let lastResult = null;
+const $ = id => document.getElementById(id);
+
+// ====== 入力判定（ファイル or URL のどちらかが入っていればボタン有効化）======
+function updateButton() {
+  $("run").disabled = !$("file").files[0] && !$("url").value.trim();
+}
+
+$("file").addEventListener("change", () => {
+  $("preview").innerHTML = "";
+  const f = $("file").files[0];
+  if (!f) { updateButton(); return; }
+  const el = f.type.startsWith("video/") ? document.createElement("video") : document.createElement("audio");
+  el.src = URL.createObjectURL(f);
+  el.controls = true;
+  el.className = "w-full mt-2 max-h-64";
+  $("preview").appendChild(el);
+  updateButton();
+});
+$("url").addEventListener("input", updateButton);
+
+// ====== 文字起こし実行 ======
+$("run").addEventListener("click", async () => {
+  $("run").disabled = true;
+  $("status").textContent = "処理中…（音声長により1〜5分かかります）";
+  const fd = new FormData();
+  if ($("file").files[0]) fd.append("file", $("file").files[0]);
+  else                    fd.append("url",  $("url").value.trim());
+  fd.append("glossary",        $("glossary").value || "");
+  fd.append("with_timestamps", $("withTimestamps").checked ? "true" : "false");
+
+  try {
+    const r = await fetch("/transcribe", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) {
+      $("status").textContent = "エラー: " + (j.error || r.status);
+      updateButton();
+      return;
+    }
+    lastResult = j;
+    renderResult(j);
+    $("status").textContent = "完了";
+  } catch (err) {
+    $("status").textContent = "通信エラー: " + err;
+  }
+  updateButton();
+});
+
+function renderResult(j) {
+  $("result").classList.remove("hidden");
+  $("summarize").classList.remove("hidden");
+  $("text").value = j.text || "";
+  const method = j.transcription_method === "youtube_caption"
+                 ? "YouTube字幕（無料）"
+                 : ("Gemini: " + (j.model || ""));
+  // 使用オプションのアイコン表示（タイムスタンプ🕒、用語集📖）
+  const opts = j.options
+    ? ` ${j.options.with_timestamps ? "🕒" : ""}${j.options.glossary ? " 📖" : ""}`
+    : "";
+  $("meta").textContent = `[${method}${opts}] ${j.created_at || ""}`;
+}
+
+function copyText()    { navigator.clipboard.writeText($("text").value); }
+function copySummary() { navigator.clipboard.writeText($("sumResult").textContent); }
+
+function downloadTxt() {
+  const blob = new Blob([$("text").value], {type: "text/plain"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "transcript.txt";
+  a.click();
+}
+
+// ====== 要約生成（テンプレート × モデル切替可能） ======
+$("sumRun").addEventListener("click", async () => {
+  if (!$("text").value.trim()) return;
+  $("sumRun").disabled = true;
+  $("sumStatus").textContent = "要約中…";
+  try {
+    const r = await fetch("/transcribe/summarize", {
+      method:  "POST",
+      headers: {"Content-Type": "application/json"},
+      body:    JSON.stringify({
+        text:     $("text").value,
+        model:    $("model").value,
+        template: $("template").value,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      $("sumStatus").textContent = "エラー: " + (j.error || r.status);
+    } else {
+      $("sumResult").textContent = j.summary || "";
+      $("sumStatus").textContent = `完了（${j.template_used} / ${j.model_used}）`;
+    }
+  } catch (err) {
+    $("sumStatus").textContent = "通信エラー: " + err;
+  }
+  $("sumRun").disabled = false;
+});
+
+// ====== 履歴一覧と個別読み込み ======
+$("historyBtn").addEventListener("click", async () => {
+  const panel = $("historyPanel");
+  if (panel.classList.contains("hidden")) {
+    panel.classList.remove("hidden");
+    $("historyBtn").textContent = "📜 履歴を閉じる";
+    await loadHistory();
+  } else {
+    panel.classList.add("hidden");
+    $("historyBtn").textContent = "📜 履歴を表示";
+  }
+});
+
+async function loadHistory() {
+  $("historyStatus").textContent = "読み込み中…";
+  $("historyList").innerHTML = "";
+  try {
+    const r = await fetch("/transcribe/history?limit=20");
+    const j = await r.json();
+    if (!r.ok) {
+      $("historyStatus").textContent = "エラー: " + (j.error || r.status);
+      return;
+    }
+    if (!j.data || j.data.length === 0) {
+      $("historyList").innerHTML = '<div class="text-slate-500">履歴がありません</div>';
+      $("historyStatus").textContent = "0件";
+      return;
+    }
+    $("historyStatus").textContent = `${j.count}件`;
+    j.data.forEach(item => {
+      const div = document.createElement("div");
+      div.className = "border rounded p-2 hover:bg-slate-50 cursor-pointer";
+      const title = (item.source_info && (item.source_info.filename || item.source_info.title || item.source_info.url)) || "(タイトル不明)";
+      const created = item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "";
+      div.innerHTML = `
+        <div class="flex justify-between items-start gap-2">
+          <div class="font-medium truncate">${escapeHtml(title)}</div>
+          <div class="text-xs text-slate-500 shrink-0">${escapeHtml(created)}</div>
+        </div>
+        <div class="text-xs text-slate-600 mt-1">${escapeHtml(item.text_preview || "")}</div>
+        <div class="text-xs text-slate-400 mt-1">${escapeHtml(item.source || "")} · ${item.text_length || 0}字</div>
+      `;
+      div.onclick = () => loadHistoryOne(item.filename);
+      $("historyList").appendChild(div);
+    });
+  } catch (err) {
+    $("historyStatus").textContent = "通信エラー: " + err;
+  }
+}
+
+// 履歴の個別読込：結果カードに復元して再要約可能にする
+async function loadHistoryOne(filename) {
+  $("historyStatus").textContent = "読み込み中…";
+  try {
+    const r = await fetch("/transcribe/history/" + encodeURIComponent(filename));
+    const j = await r.json();
+    if (!r.ok) {
+      $("historyStatus").textContent = "エラー: " + (j.error || r.status);
+      return;
+    }
+    lastResult = j;
+    renderResult(j);
+    $("result").scrollIntoView({behavior: "smooth"});
+    $("historyStatus").textContent = "履歴から読み込みました（テキスト編集後、観点を変えて再要約可能）";
+  } catch (err) {
+    $("historyStatus").textContent = "通信エラー: " + err;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+</script>
+</body>
+</html>

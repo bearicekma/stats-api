@@ -1,3 +1,4 @@
+# Stats API の依存パッケージ一覧
 fastapi
 hypercorn
 httpx
@@ -16,3 +17,6 @@ yfinance
 google-cloud-vision
 pymupdf
 python-multipart
+google-genai
+yt-dlp
+youtube-transcript-api

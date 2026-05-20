@@ -2,7 +2,7 @@
 
 from fastapi           import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse, ORJSONResponse
-from fastapi.middleware.gzip import GZipMiddleware   # ← 追加: gzip圧縮用
+from fastapi.middleware.gzip import GZipMiddleware
 from pathlib           import Path
 from datetime          import datetime
 from app.database      import get_stats
@@ -13,11 +13,10 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr  # ← 追加(OCR): ocr
+# ← 追加(Transcribe): transcribe
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
-
-# ← 追加: レスポンスをgzip圧縮する（1KB未満は圧縮効果が薄いため対象外）
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # 各データソースのルーターを登録する
@@ -33,7 +32,8 @@ app.include_router(jma.router)
 app.include_router(edinet.router)
 app.include_router(master.router)
 app.include_router(kabuka.router)
-app.include_router(ocr.router)   # ← 追加(OCR): /ocr エンドポイント群
+app.include_router(ocr.router)
+app.include_router(transcribe.router)   # ← 追加(Transcribe): /transcribe エンドポイント群
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
@@ -53,7 +53,6 @@ def root():
 
 @app.get("/guide", response_class=HTMLResponse)
 def guide():
-    # 利用者向けAPIガイドページを返す
     return HTMLResponse(GUIDE_HTML.read_text(encoding="utf-8"))
 
 
@@ -71,19 +70,6 @@ def get_collection(collection_name: str):
 async def trigger_collection(background_tasks: BackgroundTasks, target: str = None):
     """
     データ収集をバックグラウンドで開始します。
-
-    **クエリパラメータ:**
-    - `target` (任意) 収集対象を指定。省略時は全ソースを一括収集します
-
-    **利用可能な target 値:**
-    - `d_kanko` デジタル観光統計（毎月第2木曜）
-    - `n_roudou` 長野労働局 求人統計（毎月末）
-    - `enecho_gasoline` 資源エネルギー庁 ガソリン価格（毎週水曜、GitHub Actions経由）
-    - `jma_nagano` 気象庁 長野県天気予報（毎朝6:00 JST）
-
-    **URL例:**
-    - `/collect` 全ソース一括収集
-    - `/collect?target=jma_nagano` 天気予報のみ収集
     """
     if target is None:
         background_tasks.add_task(run_all_collections)
