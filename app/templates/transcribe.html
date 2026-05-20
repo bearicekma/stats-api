@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- 文字起こしWebUI: 音声/動画 or YouTube URL → Gemini文字起こし → 要約 -->
-<!-- 機能: 用語集指定、タイムスタンプ付与、用途別要約テンプレート、過去履歴呼び出し -->
+<!-- 機能: 用語集、タイムスタンプ、用途別要約テンプレ、過去履歴、料金トラッキング（為替UI連動） -->
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
@@ -10,9 +10,19 @@
 </head>
 <body class="bg-slate-50 text-slate-800">
   <div class="max-w-3xl mx-auto p-6">
-    <div class="flex items-center justify-between mb-1">
+
+    <!-- ヘッダー: タイトル + 為替レート入力 + 履歴ボタン -->
+    <div class="flex items-center justify-between mb-1 flex-wrap gap-3">
       <h1 class="text-2xl font-bold">音声・動画文字起こし</h1>
-      <button id="historyBtn" class="text-sm text-blue-600 hover:underline">📜 履歴を表示</button>
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1 bg-white border rounded px-2 py-1 text-sm" title="USD→JPY換算レート。ブラウザに保存され全料金表示に反映">
+          <span class="text-slate-500">💱 1USD =</span>
+          <input id="fxRate" type="number" step="0.5" min="1"
+                 class="w-16 text-right outline-none focus:ring-1 focus:ring-blue-300">
+          <span class="text-slate-500">円</span>
+        </div>
+        <button id="historyBtn" class="text-sm text-blue-600 hover:underline">📜 履歴を表示</button>
+      </div>
     </div>
     <p class="text-sm text-slate-500 mb-4">
       音声/動画ファイル（30MB以下）または YouTube/動画URLから自動文字起こし＋AI整形（Vertex AI Gemini 2.5 Flash）
@@ -72,7 +82,7 @@
 
     <!-- 文字起こし結果カード -->
     <div id="result" class="hidden bg-white rounded-xl shadow p-5 mb-4">
-      <div class="flex justify-between items-center mb-2">
+      <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
         <h2 class="text-lg font-semibold">文字起こし結果</h2>
         <span id="meta" class="text-xs text-slate-500"></span>
       </div>
@@ -113,7 +123,39 @@
 let lastResult = null;
 const $ = id => document.getElementById(id);
 
-// ====== 入力判定（ファイル or URL のどちらかが入っていればボタン有効化）======
+// ===========================================================
+// 為替レート（localStorage保存・全料金表示に反映）
+// ===========================================================
+const RATE_KEY = "stats_api_usd_jpy_rate";
+let usdJpyRate = parseFloat(localStorage.getItem(RATE_KEY)) || 155;
+
+$("fxRate").value = usdJpyRate;
+$("fxRate").addEventListener("input", () => {
+  const v = parseFloat($("fxRate").value);
+  if (v > 0) {
+    usdJpyRate = v;
+    localStorage.setItem(RATE_KEY, v);
+    refreshAllCosts();   // 表示中の全料金を再計算
+  }
+});
+
+// USD金額（数値）→ 表示用文字列「$X.XXXX (¥Y.YY)」
+function fmtCost(usd) {
+  const u = (typeof usd === 'number' && isFinite(usd)) ? usd : 0;
+  return `$${u.toFixed(4)} (¥${(u * usdJpyRate).toFixed(2)})`;
+}
+
+// data-usd 属性を持つ全要素を現在レートで再描画
+function refreshAllCosts() {
+  document.querySelectorAll('[data-usd]').forEach(el => {
+    const usd = parseFloat(el.dataset.usd) || 0;
+    el.textContent = fmtCost(usd);
+  });
+}
+
+// ===========================================================
+// 入力判定
+// ===========================================================
 function updateButton() {
   $("run").disabled = !$("file").files[0] && !$("url").value.trim();
 }
@@ -131,7 +173,9 @@ $("file").addEventListener("change", () => {
 });
 $("url").addEventListener("input", updateButton);
 
-// ====== 文字起こし実行 ======
+// ===========================================================
+// 文字起こし実行
+// ===========================================================
 $("run").addEventListener("click", async () => {
   $("run").disabled = true;
   $("status").textContent = "処理中…（音声長により1〜5分かかります）";
@@ -165,11 +209,14 @@ function renderResult(j) {
   const method = j.transcription_method === "youtube_caption"
                  ? "YouTube字幕（無料）"
                  : ("Gemini: " + (j.model || ""));
-  // 使用オプションのアイコン表示（タイムスタンプ🕒、用語集📖）
   const opts = j.options
     ? ` ${j.options.with_timestamps ? "🕒" : ""}${j.options.glossary ? " 📖" : ""}`
     : "";
-  $("meta").textContent = `[${method}${opts}] ${j.created_at || ""}`;
+  // 料金は data-usd 付きspanで描画 → 為替変更時に refreshAllCosts() で更新される
+  const usd = (j.cost && typeof j.cost.usd === 'number') ? j.cost.usd : 0;
+  $("meta").innerHTML =
+    `[${escapeHtml(method + opts)}] ${escapeHtml(j.created_at || "")} · ` +
+    `💰 <span data-usd="${usd}">${escapeHtml(fmtCost(usd))}</span>`;
 }
 
 function copyText()    { navigator.clipboard.writeText($("text").value); }
@@ -183,7 +230,9 @@ function downloadTxt() {
   a.click();
 }
 
-// ====== 要約生成（テンプレート × モデル切替可能） ======
+// ===========================================================
+// 要約生成
+// ===========================================================
 $("sumRun").addEventListener("click", async () => {
   if (!$("text").value.trim()) return;
   $("sumRun").disabled = true;
@@ -203,7 +252,11 @@ $("sumRun").addEventListener("click", async () => {
       $("sumStatus").textContent = "エラー: " + (j.error || r.status);
     } else {
       $("sumResult").textContent = j.summary || "";
-      $("sumStatus").textContent = `完了（${j.template_used} / ${j.model_used}）`;
+      const usd = (j.cost && typeof j.cost.usd === 'number') ? j.cost.usd : 0;
+      // sumStatusも data-usd 連動
+      $("sumStatus").innerHTML =
+        `完了（${escapeHtml(j.template_used)} / ${escapeHtml(j.model_used)}）· ` +
+        `💰 <span data-usd="${usd}">${escapeHtml(fmtCost(usd))}</span>`;
     }
   } catch (err) {
     $("sumStatus").textContent = "通信エラー: " + err;
@@ -211,7 +264,9 @@ $("sumRun").addEventListener("click", async () => {
   $("sumRun").disabled = false;
 });
 
-// ====== 履歴一覧と個別読み込み ======
+// ===========================================================
+// 履歴一覧（個別読込で再要約可能）
+// ===========================================================
 $("historyBtn").addEventListener("click", async () => {
   const panel = $("historyPanel");
   if (panel.classList.contains("hidden")) {
@@ -243,15 +298,22 @@ async function loadHistory() {
     j.data.forEach(item => {
       const div = document.createElement("div");
       div.className = "border rounded p-2 hover:bg-slate-50 cursor-pointer";
-      const title = (item.source_info && (item.source_info.filename || item.source_info.title || item.source_info.url)) || "(タイトル不明)";
+      const title   = (item.source_info && (item.source_info.filename || item.source_info.title || item.source_info.url)) || "(タイトル不明)";
       const created = item.created_at ? new Date(item.created_at).toLocaleString("ja-JP") : "";
+      const usd     = (item.cost && typeof item.cost.usd === 'number') ? item.cost.usd : 0;
+      const freeBadge = usd === 0
+        ? ' <span class="text-emerald-600 font-medium">無料</span>'
+        : "";
       div.innerHTML = `
         <div class="flex justify-between items-start gap-2">
           <div class="font-medium truncate">${escapeHtml(title)}</div>
           <div class="text-xs text-slate-500 shrink-0">${escapeHtml(created)}</div>
         </div>
         <div class="text-xs text-slate-600 mt-1">${escapeHtml(item.text_preview || "")}</div>
-        <div class="text-xs text-slate-400 mt-1">${escapeHtml(item.source || "")} · ${item.text_length || 0}字</div>
+        <div class="text-xs text-slate-400 mt-1">
+          ${escapeHtml(item.source || "")} · ${item.text_length || 0}字 ·
+          💰 <span data-usd="${usd}">${escapeHtml(fmtCost(usd))}</span>${freeBadge}
+        </div>
       `;
       div.onclick = () => loadHistoryOne(item.filename);
       $("historyList").appendChild(div);
@@ -261,7 +323,6 @@ async function loadHistory() {
   }
 }
 
-// 履歴の個別読込：結果カードに復元して再要約可能にする
 async function loadHistoryOne(filename) {
   $("historyStatus").textContent = "読み込み中…";
   try {
