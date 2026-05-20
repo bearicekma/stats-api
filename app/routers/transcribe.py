@@ -105,6 +105,19 @@ ToDoに該当しない雑談・前置き・状況説明は一切含めない。
 各行20〜40文字程度。最も重要な要点のみ抽出。前置きや補足は不要。""",
 }
 
+# 料金単価（USD per 1M tokens）。Anthropic/Vertex AI 公式 2026-05 時点。為替は固定。
+# 単価が変わったらここを更新するだけでよい。
+PRICING = {
+    "gemini-2.5-flash": {
+        "text_input":  0.30,
+        "audio_input": 1.00,
+        "output":      2.50,
+    },
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5":  {"input": 1.00, "output":  5.00},
+}
+USD_JPY_RATE = 155
+
 TRANSCRIBE_HTML = Path(__file__).parent.parent / "templates" / "transcribe.html"
 JST = timezone(timedelta(hours=9))
 
@@ -277,8 +290,106 @@ def _delete_gcs_uri(gcs_uri: str):
         print(f"GCS一時ファイル削除失敗: {e}")
 
 
-def _transcribe_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> str:
-    # Gemini 2.5 Flash で音声→整形済テキスト（プロンプトは外から注入）
+def _extract_gemini_usage(resp) -> dict:
+    # Geminiレスポンスからトークン使用量を抽出（SDKバージョン・命名差に耐える防御実装）
+    # 取れない場合は Cloud Run Logs に構造をdumpするので、ログを見て追加修正できる
+    out = {"input_total_tokens": 0, "text_input_tokens": 0, "audio_input_tokens": 0, "output_tokens": 0, "extracted": False}
+    try:
+        um = getattr(resp, "usage_metadata", None) or getattr(resp, "usageMetadata", None)
+        if um is None:
+            print("[transcribe-debug] usage_metadata is None")
+            try:
+                if hasattr(resp, "model_dump"):
+                    print(f"[transcribe-debug] resp.model_dump(): {resp.model_dump()}")
+                elif hasattr(resp, "to_dict"):
+                    print(f"[transcribe-debug] resp.to_dict(): {resp.to_dict()}")
+                else:
+                    print(f"[transcribe-debug] resp attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
+            except Exception as e:
+                print(f"[transcribe-debug] dump failed: {e}")
+            return out
+
+        print(f"[transcribe-debug] usage_metadata: {um}")
+        input_total  = getattr(um, "prompt_token_count", None)     or getattr(um, "promptTokenCount", None)     or 0
+        output_total = getattr(um, "candidates_token_count", None) or getattr(um, "candidatesTokenCount", None) or 0
+        out["input_total_tokens"] = int(input_total or 0)
+        out["output_tokens"]      = int(output_total or 0)
+
+        details = getattr(um, "prompt_tokens_details", None) or getattr(um, "promptTokensDetails", None) or []
+        for d in details:
+            modality = str(getattr(d, "modality", "") or getattr(d, "Modality", "") or "").upper()
+            count    = int(getattr(d, "token_count", 0) or getattr(d, "tokenCount", 0) or 0)
+            if "AUDIO" in modality:
+                out["audio_input_tokens"] += count
+            elif "TEXT" in modality:
+                out["text_input_tokens"]  += count
+
+        if out["text_input_tokens"] == 0 and out["audio_input_tokens"] == 0 and out["input_total_tokens"] > 0:
+            out["text_input_tokens"] = out["input_total_tokens"]
+
+        out["extracted"] = (out["input_total_tokens"] > 0 or out["output_tokens"] > 0)
+        return out
+    except Exception as e:
+        print(f"[transcribe-debug] usage extraction failed: {e}")
+        return out
+
+
+def _calc_gemini_cost(usage: dict) -> float:
+    # Gemini 2.5 Flash の費用計算（USD）
+    p = PRICING[GEMINI_MODEL]
+    return (
+        usage.get("text_input_tokens",  0) / 1_000_000 * p["text_input"]
+      + usage.get("audio_input_tokens", 0) / 1_000_000 * p["audio_input"]
+      + usage.get("output_tokens",      0) / 1_000_000 * p["output"]
+    )
+
+
+def _calc_claude_cost(usage: dict, model: str) -> float:
+    # Claude（Sonnet/Haiku）の費用計算（USD）
+    p = PRICING.get(model, {"input": 0, "output": 0})
+    return (
+        usage.get("input_tokens",  0) / 1_000_000 * p["input"]
+      + usage.get("output_tokens", 0) / 1_000_000 * p["output"]
+    )
+
+
+def _format_cost(cost_usd: float) -> dict:
+    # 料金を USD・JPY 両方の数値と表示用文字列で返す
+    cost_jpy = cost_usd * USD_JPY_RATE
+    return {
+        "usd":         round(cost_usd, 6),
+        "jpy":         round(cost_jpy, 2),
+        "usd_display": f"${cost_usd:.4f}",
+        "jpy_display": f"¥{cost_jpy:.2f}",
+        "fx_rate":     USD_JPY_RATE,
+    }
+
+
+def _estimate_audio_duration_sec(audio_bytes: bytes) -> float:
+    # ffprobe で音声/動画の長さ（秒）を取得。失敗時は0
+    # usage_metadata が取れない時のフォールバック計算用
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", tmp_path],
+                check=True, capture_output=True, timeout=30, text=True
+            )
+            return float(r.stdout.strip())
+        finally:
+            os.unlink(tmp_path)
+    except Exception as e:
+        print(f"[transcribe-debug] duration probe failed: {e}")
+        return 0.0
+
+
+def _transcribe_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> tuple[str, dict]:
+    # 戻り値: (文字起こしテキスト, usage辞書)
+    # usage_metadataが取れない場合は音声長から推定して必ず料金算出可能にする
     from google.genai import types
     client = _get_genai_client()
 
@@ -290,35 +401,48 @@ def _transcribe_with_gemini(audio_bytes: bytes, mime_type: str, prompt: str) -> 
             temp_gcs_uri = _upload_temp_to_gcs(audio_bytes, mime_type)
             audio_part = types.Part.from_uri(file_uri=temp_gcs_uri, mime_type=mime_type)
 
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[audio_part, prompt],
-        )
-        return (resp.text or "").strip()
+        resp  = client.models.generate_content(model=GEMINI_MODEL, contents=[audio_part, prompt])
+        text  = (resp.text or "").strip()
+        usage = _extract_gemini_usage(resp)
+
+        # フォールバック: 抽出失敗時は音声長から推定（Gemini公式: 音声1秒=25トークン）
+        if not usage.get("extracted"):
+            duration_sec = _estimate_audio_duration_sec(audio_bytes)
+            usage["audio_input_tokens"] = int(duration_sec * 25)
+            usage["output_tokens"]      = int(len(text) / 4)
+            usage["estimated"]          = True
+            usage["duration_sec"]       = round(duration_sec, 1)
+            print(f"[transcribe-debug] fallback: duration={duration_sec}s -> audio_tokens={usage['audio_input_tokens']}, output_tokens={usage['output_tokens']}")
+
+        return text, usage
     finally:
         if temp_gcs_uri:
             _delete_gcs_uri(temp_gcs_uri)
 
 
-def _summarize_with_claude(prompt: str, model: str) -> str:
-    # Claude（Sonnet or Haiku）で要約生成
+def _summarize_with_claude(prompt: str, model: str) -> tuple[str, dict]:
+    # 戻り値: (要約テキスト, usage辞書)
     client = _get_anthropic_client()
     msg = client.messages.create(
         model=model,
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
-    return msg.content[0].text
+    text  = msg.content[0].text
+    usage = {
+        "input_tokens":  int(getattr(msg.usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(msg.usage, "output_tokens", 0) or 0),
+    }
+    return text, usage
 
 
-def _summarize_with_gemini(prompt: str) -> str:
-    # Gemini で要約生成（プロバイダ統一したい時用）
+def _summarize_with_gemini(prompt: str) -> tuple[str, dict]:
+    # 戻り値: (要約テキスト, usage辞書)
     client = _get_genai_client()
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[prompt],
-    )
-    return (resp.text or "").strip()
+    resp   = client.models.generate_content(model=GEMINI_MODEL, contents=[prompt])
+    text   = (resp.text or "").strip()
+    usage  = _extract_gemini_usage(resp)
+    return text, usage
 
 
 # =============================================================
@@ -429,6 +553,8 @@ async def transcribe_run(
                         "transcription_method": "youtube_caption",
                         "model":                None,
                         "options":              {"glossary": None, "with_timestamps": False},
+                        "usage":                {"input_total_tokens": 0, "text_input_tokens": 0, "audio_input_tokens": 0, "output_tokens": 0},
+                        "cost":                 _format_cost(0.0),
                         "created_at":           datetime.now(JST).isoformat(),
                     }
                     result["saved_to"] = _save_transcript_to_gcs(result)
@@ -440,7 +566,8 @@ async def transcribe_run(
             mime_type   = "audio/ogg"
 
         # ===== Gemini文字起こし =====
-        text = _transcribe_with_gemini(audio_bytes, mime_type, prompt)
+        text, usage = _transcribe_with_gemini(audio_bytes, mime_type, prompt)
+        cost_usd    = _calc_gemini_cost(usage)
 
         result = {
             "source":               source_type,
@@ -452,6 +579,8 @@ async def transcribe_run(
                 "glossary":        glossary or None,
                 "with_timestamps": with_timestamps,
             },
+            "usage":                usage,
+            "cost":                 _format_cost(cost_usd),
             "created_at":           datetime.now(JST).isoformat(),
         }
         result["saved_to"] = _save_transcript_to_gcs(result)
@@ -502,13 +631,18 @@ def transcribe_summarize(payload: dict = Body(...)):
 
     try:
         if model_key == "gemini":
-            summary = _summarize_with_gemini(prompt)
+            summary, usage = _summarize_with_gemini(prompt)
+            cost_usd       = _calc_gemini_cost(usage)
         else:
-            summary = _summarize_with_claude(prompt, SUMMARY_MODELS[model_key])
+            model_name     = SUMMARY_MODELS[model_key]
+            summary, usage = _summarize_with_claude(prompt, model_name)
+            cost_usd       = _calc_claude_cost(usage, model_name)
         return {
             "summary":       summary,
             "model_used":    SUMMARY_MODELS[model_key],
             "template_used": template_key,
+            "usage":         usage,
+            "cost":          _format_cost(cost_usd),
             "created_at":    datetime.now(JST).isoformat(),
         }
     except Exception as e:
@@ -554,6 +688,8 @@ def transcribe_history(limit: int = 20):
                     "transcription_method": data.get("transcription_method"),
                     "model":                data.get("model"),
                     "options":              data.get("options"),
+                    "usage":                data.get("usage"),
+                    "cost":                 data.get("cost"),
                     "text_preview":         text[:200] + ("…" if len(text) > 200 else ""),
                     "text_length":          len(text),
                 })
