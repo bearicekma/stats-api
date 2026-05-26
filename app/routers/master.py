@@ -106,7 +106,7 @@ async def get_master(collection_name: str, request: Request):
             if weekday is not None:
                 conditions.append(f"曜日コード = {int(weekday)}")
 
-        # ORDER BY句をcollectionごとに決定（存在しない列を指定するとBinder Errorになる）
+        # ORDER BY句をcollectionごとに決定（存在しない列を指定するとBinder Errorになる.）
         order_map = {
             "_M_calendar": "DATE",
             "_M_city":     "code_5_digit",
