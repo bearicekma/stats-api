@@ -1,7 +1,7 @@
 # マスタデータエンドポイント
-# /master/_M_pref : 都道府県マスタ
-# /master/_M_city       : 市区町村マスタ
-# /master/_M_calendar   : カレンダーマスタ（祝日・平日判定）
+# /master/_M_pref     : 都道府県マスタ
+# /master/_M_city     : 市区町村マスタ
+# /master/_M_calendar : カレンダーマスタ（祝日・平日判定）
 
 from datetime import datetime
 
@@ -106,8 +106,17 @@ async def get_master(collection_name: str, request: Request):
             if weekday is not None:
                 conditions.append(f"曜日コード = {int(weekday)}")
 
+        # ORDER BY句をcollectionごとに決定（存在しない列を指定するとBinder Errorになる）
+        order_map = {
+            "_M_calendar": "DATE",
+            "_M_city":     "code_5_digit",
+            "_M_pref":     "code",
+        }
+        order_col = order_map.get(collection_name)
+        order_by  = f"ORDER BY {order_col}" if order_col else ""
+
         where  = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        sql    = f"SELECT * FROM read_parquet('{tmp_path}') {where} ORDER BY DATE"
+        sql    = f"SELECT * FROM read_parquet('{tmp_path}') {where} {order_by}"
         result = duckdb.query(sql).df()
         data   = result.to_dict(orient="records")
         return {"collection": collection_name, "updated_at": str(datetime.now()), "count": len(data), "data": data}
