@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!-- Drive PDF 一覧: /drive_rename/files のJSONを取得し、年月別にグルーピング表示 -->
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drive PDF一覧 | Stats API</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-3xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-1">日経PDF 一覧</h1>
+    <p class="text-sm text-slate-500 mb-6">フォルダ内のPDFを年月別に表示します</p>
+
+    <div class="flex items-center gap-3 mb-4">
+      <button id="reload"
+              class="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-sm">再読み込み</button>
+      <span id="status" class="text-sm text-slate-500"></span>
+    </div>
+
+    <div id="list" class="space-y-6"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ファイル名先頭8桁(YYYYMMDD)から「YYYY年MM月」キーと表示日付を取り出す
+function parseDate(name) {
+  const base = name.replace(/\.pdf$/i, "");
+  const m = base.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (!m) return { ym: "その他", day: "" };
+  return { ym: `${m[1]}年${m[2]}月`, day: `${m[2]}/${m[3]}` };
+}
+
+// Drive プレビューリンク（ブラウザでDrive上で開く）
+function viewUrl(id) {
+  return `https://drive.google.com/file/d/${id}/view`;
+}
+
+function render(files) {
+  // 年月キーでグルーピング
+  const groups = {};
+  for (const f of files) {
+    const { ym, day } = parseDate(f.name);
+    (groups[ym] = groups[ym] || []).push({ ...f, _day: day });
+  }
+
+  // 年月キーを新しい順にソート（「その他」は末尾）
+  const keys = Object.keys(groups).sort((a, b) => {
+    if (a === "その他") return 1;
+    if (b === "その他") return -1;
+    return b.localeCompare(a);
+  });
+
+  const html = keys.map(ym => {
+    // 各グループ内はファイル名降順（新しい日付が上）
+    const items = groups[ym].sort((a, b) => b.name.localeCompare(a.name));
+    const rows = items.map(f => {
+      const badge = f.renamed
+        ? ""
+        : `<span class="ml-2 text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">未処理</span>`;
+      const day = f._day ? `<span class="text-slate-400 text-xs mr-2">${f._day}</span>` : "";
+      return `
+        <li class="flex items-center justify-between py-2 border-b border-slate-100">
+          <div class="min-w-0">
+            ${day}
+            <span class="text-sm break-all">${f.name}</span>
+            ${badge}
+          </div>
+          <a href="${viewUrl(f.id)}" target="_blank" rel="noopener"
+             class="shrink-0 ml-3 text-blue-600 text-sm hover:underline">開く</a>
+        </li>`;
+    }).join("");
+
+    return `
+      <div class="bg-white rounded-xl shadow p-5">
+        <h2 class="font-bold mb-2">${ym}
+          <span class="text-slate-400 text-sm font-normal">（${items.length}件）</span>
+        </h2>
+        <ul>${rows}</ul>
+      </div>`;
+  }).join("");
+
+  $("list").innerHTML = html || `<p class="text-slate-500">ファイルがありません</p>`;
+}
+
+async function load() {
+  $("status").textContent = "読み込み中…";
+  try {
+    const res = await fetch("/drive_rename/files");
+    const json = await res.json();
+    if (json.error) throw new Error(json.detail || json.error);
+    render(json.files || []);
+    $("status").textContent = `${json.count}件`;
+  } catch (e) {
+    $("status").textContent = "読み込み失敗: " + e.message;
+  }
+}
+
+$("reload").addEventListener("click", load);
+load();  // 初回自動読み込み
+</script>
+</body>
+</html>

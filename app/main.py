@@ -14,7 +14,7 @@ from app.collector     import (
     run_jma_collection,
 )
 # ← 追加(Transcribe): transcribe
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -34,6 +34,7 @@ app.include_router(master.router)
 app.include_router(kabuka.router)
 app.include_router(ocr.router)
 app.include_router(transcribe.router)   # ← 追加(Transcribe): /transcribe エンドポイント群
+app.include_router(drive_rename.router)   # ← 追加: /drive_rename エンドポイント群
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
