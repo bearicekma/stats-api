@@ -3,18 +3,25 @@
 #  - 数日以内アップロード & 未処理(YYYYMMDD形式)のものを抽出
 #  - PDFを直接Geminiに渡して見出しを生成し「YYYYMMDD_見出し」にリネーム
 #  - 認証は OAuth 2.0 ユーザー委任(refresh_token)、値は環境変数から取得
+#  - Geminiは候補モデルを順に試すフォールバック方式（廃止/日次上限は即次へ）
 
 import os
 import re
 import io
+import time
 from datetime import datetime, timezone, timedelta
 
 # ---- 設定値 ----
-TARGET_FOLDER_ID = "141cGbdt8MalPRPP15tHjlED7DlZd24z9"  # 対象フォルダ
-RECENT_DAYS      = 3            # アップロードからこの日数以内のみ対象
-MAX_HEADLINES    = 3            # 連結する見出しの最大本数
-MAX_NAME_LEN     = 100          # ファイル名(日付含む)のおおよその上限
-GEMINI_MODEL     = "gemini-2.5-flash"
+TARGET_FOLDER_ID  = "141cGbdt8MalPRPP15tHjlED7DlZd24z9"  # 対象フォルダ
+RECENT_DAYS       = 3       # アップロードからこの日数以内のみ対象
+MAX_HEADLINES     = 3       # 連結する見出しの最大本数
+MAX_NAME_LEN      = 100     # ファイル名(日付含む)のおおよその上限
+MAX_FILES_PER_RUN = 20      # 1回のrunで処理する最大件数（無料枠20/日の安全弁）
+
+# Geminiの候補モデル（無料枠で使える順。先頭から試す）
+GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash"]
+MAX_RPM_RETRY  = 2          # 分次(RPM)一時超過時のリトライ回数
+RPM_RETRY_WAIT = 8          # リトライ前の待機秒数
 
 # 未処理ファイル名の判定：YYYYMMDD または YYYYMMDD (n)
 _NAME_PATTERN = re.compile(r"^(\d{8})(?:\s*\(\d+\))?$")
@@ -87,7 +94,9 @@ def _download_pdf_bytes(service, file_id):
 
 
 def _generate_headline(pdf_bytes):
-    # PDFを直接Geminiに渡して主要見出しを生成する
+    # PDFを直接Geminiに渡して主要見出しを生成する。
+    # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
+    # 分次(PerMinute)など一時超過のみ短い待機後にリトライ。
     from google import genai
     from google.genai import types
 
@@ -102,24 +111,55 @@ def _generate_headline(pdf_bytes):
         "- 記号・改行・番号は付けない\n"
         "- 1行に1見出しだけを出力（説明文は不要）"
     )
+    parts = [
+        types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        prompt,
+    ]
 
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            prompt,
-        ],
-    )
-    text = (resp.text or "").strip()
-    if not text:
-        return None
+    last_error = None
 
-    # 行ごとに分解→先頭の記号/番号を除去→最大本数で「・」連結
-    lines = [ln.strip(" 　・-*0123456789.") for ln in text.splitlines() if ln.strip()]
-    lines = [ln for ln in lines if ln][:MAX_HEADLINES]
-    if not lines:
-        return None
-    return "・".join(lines)
+    for model in GEMINI_MODELS:
+        attempt = 0
+        while True:
+            try:
+                resp = client.models.generate_content(model=model, contents=parts)
+                text = (resp.text or "").strip()
+                if not text:
+                    last_error = f"{model}: 空応答"
+                    break  # 次の候補へ
+                # 行ごとに分解→記号/番号を除去→最大本数で「・」連結
+                lines = [ln.strip(" 　・-*0123456789.") for ln in text.splitlines() if ln.strip()]
+                lines = [ln for ln in lines if ln][:MAX_HEADLINES]
+                if not lines:
+                    last_error = f"{model}: 見出し抽出できず"
+                    break  # 次の候補へ
+                return "・".join(lines)
+
+            except Exception as e:
+                msg = str(e)
+                last_error = f"{model}: {msg}"
+
+                # 429以外（404など）→ このモデルでは無理、即次の候補へ
+                if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg:
+                    break
+
+                # limit: 0（無料枠対象外/廃止）→ 即次の候補へ
+                if "limit: 0" in msg or "limit:0" in msg:
+                    break
+
+                # 日次上限（PerDay）超過 → 今日は待っても無駄、即次の候補へ
+                if "PerDay" in msg:
+                    break
+
+                # 分次（PerMinute）など一時的な超過 → 回数内なら待ってリトライ
+                if attempt < MAX_RPM_RETRY:
+                    attempt += 1
+                    time.sleep(RPM_RETRY_WAIT)
+                    continue
+                else:
+                    break  # リトライ尽きた → 次の候補へ
+
+    raise RuntimeError(last_error or "見出し生成失敗（全候補）")
 
 
 def _sanitize(title):
@@ -134,7 +174,6 @@ def _unique_name(service, base):
     candidate = base
     n = 2
     while True:
-        # name内のシングルクォートはエスケープ
         safe = candidate.replace("'", "\\'")
         q = (
             f"'{TARGET_FOLDER_ID}' in parents and trashed = false "
@@ -153,6 +192,7 @@ def run_drive_rename():
     files = _list_target_pdfs(service)
 
     renamed, skipped, failed = [], 0, []
+    processed = 0  # 実際にAPIを消費した件数（成功・失敗とも）
 
     for f in files:
         name = f["name"]
@@ -168,23 +208,28 @@ def run_drive_rename():
             skipped += 1
             continue
 
+        # 件数上限に達したら、残りは未処理のまま次回へ
+        if processed >= MAX_FILES_PER_RUN:
+            skipped += 1
+            continue
+
         try:
             pdf_bytes = _download_pdf_bytes(service, f["id"])
             headline = _generate_headline(pdf_bytes)
             if not headline:
                 failed.append({"name": name, "reason": "見出し生成失敗"})
+                processed += 1
                 continue
 
             new_base = f"{date_part}_{_sanitize(headline)}"[:MAX_NAME_LEN]
             new_name = _unique_name(service, new_base)
 
-            service.files().update(
-                fileId=f["id"],
-                body={"name": new_name},
-            ).execute()
+            service.files().update(fileId=f["id"], body={"name": new_name}).execute()
             renamed.append({"from": name, "to": new_name})
+            processed += 1
         except Exception as e:
             failed.append({"name": name, "reason": str(e)})
+            processed += 1  # 失敗もAPI消費とみなしカウント
 
     return {"renamed": renamed, "skipped": skipped, "failed": failed}
 
@@ -202,6 +247,6 @@ def list_drive_pdfs():
             "name":         name,
             "created_time": f["createdTime"],
             "size":         int(f["size"]) if f.get("size") else None,
-            "renamed":      _NAME_PATTERN.match(base) is None,  # 未処理パターンに合致しない=処理済み
+            "renamed":      _NAME_PATTERN.match(base) is None,
         })
     return out
