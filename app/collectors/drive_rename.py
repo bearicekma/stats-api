@@ -14,7 +14,7 @@ TARGET_FOLDER_ID = "141cGbdt8MalPRPP15tHjlED7DlZd24z9"  # 対象フォルダ
 RECENT_DAYS      = 3            # アップロードからこの日数以内のみ対象
 MAX_HEADLINES    = 3            # 連結する見出しの最大本数
 MAX_NAME_LEN     = 100          # ファイル名(日付含む)のおおよその上限
-GEMINI_MODEL     = "gemini-2.0-flash"
+GEMINI_MODEL     = "gemini-2.5-flash"
 
 # 未処理ファイル名の判定：YYYYMMDD または YYYYMMDD (n)
 _NAME_PATTERN = re.compile(r"^(\d{8})(?:\s*\(\d+\))?$")
