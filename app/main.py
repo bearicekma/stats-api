@@ -13,11 +13,14 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-# ← 追加(Transcribe): transcribe
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka
 
 app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# レスポンスをgzip圧縮する（1KB未満は対象外）
+# compresslevel=3: 大量データのストリーミング時、圧縮CPUが送信律速になるのを避ける
+# （レベル9比で圧縮率の劣化は数%、CPU負荷は約1/4〜1/5）
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=3)
 
 # 各データソースのルーターを登録する
 app.include_router(d_kanko.router)
@@ -32,9 +35,6 @@ app.include_router(jma.router)
 app.include_router(edinet.router)
 app.include_router(master.router)
 app.include_router(kabuka.router)
-app.include_router(ocr.router)
-app.include_router(transcribe.router)   # ← 追加(Transcribe): /transcribe エンドポイント群
-app.include_router(drive_rename.router)   # ← 追加: /drive_rename エンドポイント群
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
@@ -54,6 +54,7 @@ def root():
 
 @app.get("/guide", response_class=HTMLResponse)
 def guide():
+    # 利用者向けAPIガイドページを返す
     return HTMLResponse(GUIDE_HTML.read_text(encoding="utf-8"))
 
 
@@ -71,6 +72,19 @@ def get_collection(collection_name: str):
 async def trigger_collection(background_tasks: BackgroundTasks, target: str = None):
     """
     データ収集をバックグラウンドで開始します。
+
+    **クエリパラメータ:**
+    - `target` (任意) 収集対象を指定。省略時は全ソースを一括収集します
+
+    **利用可能な target 値:**
+    - `d_kanko` デジタル観光統計（毎月第2木曜）
+    - `n_roudou` 長野労働局 求人統計（毎月末）
+    - `enecho_gasoline` 資源エネルギー庁 ガソリン価格（毎週水曜、GitHub Actions経由）
+    - `jma_nagano` 気象庁 長野県天気予報（毎朝6:00 JST）
+
+    **URL例:**
+    - `/collect` 全ソース一括収集
+    - `/collect?target=jma_nagano` 天気予報のみ収集
     """
     if target is None:
         background_tasks.add_task(run_all_collections)

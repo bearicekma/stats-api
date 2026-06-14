@@ -1,12 +1,14 @@
 # e-Stat APIエンドポイント
 # /estat/meta/{stats_data_id} : メタ情報・フィルタ後件数・推定ページ数
-# /estat/pass/{stats_data_id} : パススルー（並列先読み＋メモリ一定のストリーミング）
+# /estat/pass/{stats_data_id} : パススルー（並列先読み＋メモリ一定のストリーミング、JSON/CSV対応）
 
 from fastapi           import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from datetime          import datetime
 from collections       import deque
 import asyncio
+import csv
+import io
 import httpx
 import orjson
 import os
@@ -21,6 +23,13 @@ ESTAT_CONCURRENCY = 5
 
 # e-Stat データ取得APIのエンドポイント
 ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+
+# /pass でユーザーから受け取ってもe-Statに転送しない予約パラメータ
+# （ページング制御は内部で行うため。limit等をユーザーに上書きされるとページ割りが壊れる）
+RESERVED_PARAMS = {
+    "limit", "startposition", "metagetflg",
+    "explanationgetflg", "annotationgetflg", "format",
+}
 
 
 # ── ユーティリティ関数 ──────────────────────────────────────
@@ -46,7 +55,7 @@ def build_code_to_name_map(class_info: list) -> dict:
 
 
 def convert_row(row: dict, code_map: dict) -> dict:
-    # 1行分のデータのコードを名称に変換する
+    # 1行分のデータのコードを名称に変換する（JSON出力用）
     # 例: {"@area": "00000", "$": "105.3"} → {"地域": "全国", "値": 105.3}
     converted = {}
     for key, value in row.items():
@@ -57,6 +66,10 @@ def convert_row(row: dict, code_map: dict) -> dict:
                 converted["値"] = float(value) if "." in str(value) else int(value)
             except (ValueError, TypeError):
                 converted["値"] = value
+
+        elif key == "@unit":
+            # 単位は専用の列名に統一する
+            converted["単位"] = value
 
         elif key.startswith("@"):
             field_id = key[1:]  # 先頭の "@" を除去する
@@ -70,6 +83,33 @@ def convert_row(row: dict, code_map: dict) -> dict:
                 converted[field_id] = value
 
     return converted
+
+
+def build_csv_columns(code_map: dict) -> list:
+    # CSVの固定列を決める：分類項目のlabel（定義順）＋ 単位 ＋ 値
+    columns = [info["label"] for info in code_map.values()]
+    columns.append("単位")
+    columns.append("値")
+    return columns
+
+
+async def fetch_data_page(client: httpx.AsyncClient, base_params: dict, start_pos: int) -> list:
+    # 1ページ分のデータ行（VALUE配列）を取得する
+    # 各種GetFlg=N で付帯情報の転送を抑制し応答を軽量化する
+    page_params = dict(base_params)
+    page_params["startPosition"]     = start_pos
+    page_params["metaGetFlg"]        = "N"   # メタ情報を省略
+    page_params["explanationGetFlg"] = "N"   # 解説情報を省略
+    page_params["annotationGetFlg"]  = "N"   # 注釈情報を省略
+
+    resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
+    resp.raise_for_status()
+    values = resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+
+    # VALUEが1件のみの場合はdictで返るためリストに統一する
+    if isinstance(values, dict):
+        values = [values]
+    return values
 
 
 # ── エンドポイント ──────────────────────────────────────────
@@ -168,13 +208,17 @@ async def estat_meta(stats_data_id: str, request: Request):
 @router.get("/pass/{stats_data_id}", summary="統計データ取得（パススルー・名称変換付き）")
 async def estat_pass(stats_data_id: str, request: Request):
     """
-    e-Stat統計表のデータを取得し、コードを日本語名称に変換してJSONで返します。
+    e-Stat統計表のデータを取得し、コードを日本語名称に変換して返します。
 
     並列先読みでメモリを一定に保ちながらストリーミング送信するため、大量データにも対応します。
     Power Query / Excel での取り込みを想定した汎用エンドポイントです。
 
     **パスパラメータ:**
     - `stats_data_id` (str) e-Statの統計表ID。例: 0003427113（消費者物価指数）
+
+    **出力形式（任意）:**
+    - `format=json` (既定) JSON形式で返します
+    - `format=csv` CSV形式（UTF-8 BOM付き）で返します。大量データはCSVが軽量・高速です
 
     **クエリパラメータ（任意・e-Stat getStatsData にそのまま転送）:**
     - `cdArea` (str) 地域コード。カンマ区切りで複数指定可。例: 00000,13A01
@@ -183,12 +227,15 @@ async def estat_pass(stats_data_id: str, request: Request):
     - `cdTimeTo` (str) 時間軸の終了
     - その他 e-Stat getStatsData が受け付ける絞り込みパラメータ
 
-    **レスポンス（JSONストリーミング）:**
+    **レスポンス（JSON時・ストリーミング）:**
     - `stats_data_id` (str) 統計表ID
     - `fetched_at` (str) 取得日時
     - `total_number` (int) 総件数
     - `data` (array) コードを名称変換したデータ行（`値` は数値型に変換）
     - `count` (int) 実際に送信した件数
+
+    **レスポンス（CSV時・ストリーミング）:**
+    - 1行目がヘッダー（分類項目＋単位＋値）、2行目以降がデータ
 
     **注意:**
     - 大量データ（数十万件以上）は取得に時間がかかります。事前に /estat/meta/{stats_data_id} で件数確認を推奨します
@@ -196,17 +243,26 @@ async def estat_pass(stats_data_id: str, request: Request):
 
     **使用例:**
     - /estat/pass/0003427113?cdArea=13A01&cdTimeFrom=2020000000
+    - /estat/pass/0003427113?format=csv&cdArea=13A01
     """
     app_id = os.environ["ESTAT_APP_ID"]
 
-    # ベースパラメータにリクエストのクエリパラメータを上書きマージする
+    # 出力形式を判定する（既定はjson）
+    output_format = request.query_params.get("format", "json").lower()
+
+    # ベースパラメータを構築する
+    # 予約パラメータ（limit等）はユーザー指定を除外し、内部のページング制御を守る
     base_params = {
         "appId":       app_id,
         "statsDataId": stats_data_id,
         "lang":        "J",
         "limit":       ESTAT_LIMIT,
     }
-    base_params.update(dict(request.query_params))
+    user_params = {
+        k: v for k, v in request.query_params.items()
+        if k.lower() not in RESERVED_PARAMS
+    }
+    base_params.update(user_params)
 
     # ── 先行コール ───────────────────────────────────────
     # limit=1 で total_number と class_info（変換辞書の元）を軽量取得する
@@ -231,7 +287,34 @@ async def estat_pass(stats_data_id: str, request: Request):
     start_positions = list(range(1, total_number + 1, ESTAT_LIMIT))
     fetched_at      = str(datetime.now())
 
-    # ── ストリーム送信（並列先読み＋メモリ一定） ─────────
+    # ── ページを並列先読みしながら順に取り出すジェネレータ ─
+    # JSON/CSV両モードで共有する。送信済みページは都度メモリ解放される
+    async def iter_pages(client: httpx.AsyncClient):
+        in_flight = deque()   # 先読み中タスクのキュー（最大ESTAT_CONCURRENCY）
+        next_idx  = 0
+
+        # 先読みウィンドウを初期充填する
+        while next_idx < len(start_positions) and len(in_flight) < ESTAT_CONCURRENCY:
+            in_flight.append(asyncio.create_task(fetch_data_page(client, base_params, start_positions[next_idx])))
+            next_idx += 1
+
+        try:
+            while in_flight:
+                # 最古のページを順番に待つ（出力順序を保証）
+                values = await in_flight.popleft()
+
+                # 次ページの取得を先行開始しウィンドウを補充する
+                if next_idx < len(start_positions):
+                    in_flight.append(asyncio.create_task(fetch_data_page(client, base_params, start_positions[next_idx])))
+                    next_idx += 1
+
+                yield values
+        finally:
+            # クライアント切断時など、先読み中タスクをキャンセルしリークを防ぐ
+            for task in in_flight:
+                task.cancel()
+
+    # ── JSONストリーム ───────────────────────────────────
     async def stream_json():
         # ヘッダー部分を送出する
         yield (
@@ -245,57 +328,54 @@ async def estat_pass(stats_data_id: str, request: Request):
         first_row  = True
 
         async with httpx.AsyncClient(timeout=300) as client:
+            async for values in iter_pages(client):
+                # このページを変換しながら逐次送出する
+                for i, row in enumerate(values):
+                    prefix    = b"" if first_row else b","
+                    first_row = False
+                    # orjson.dumpsはbytesを返し非ASCIIをUTF-8でそのまま出力する
+                    yield prefix + orjson.dumps(convert_row(row, code_map))
+                    total_sent += 1
 
-            async def fetch_page(start_pos: int) -> list:
-                # 1ページ分を取得しVALUE配列を返す
-                # metaGetFlg=N で不要なメタデータ送信を抑制し応答を軽量化する
-                page_params = dict(base_params)
-                page_params["startPosition"] = start_pos
-                page_params["metaGetFlg"]    = "N"
-
-                resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
-                resp.raise_for_status()
-                return resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
-
-            in_flight = deque()   # 先読み中タスクのキュー（最大ESTAT_CONCURRENCY）
-            next_idx  = 0
-
-            # 先読みウィンドウを初期充填する（最大ESTAT_CONCURRENCYページ並列）
-            while next_idx < len(start_positions) and len(in_flight) < ESTAT_CONCURRENCY:
-                in_flight.append(asyncio.create_task(fetch_page(start_positions[next_idx])))
-                next_idx += 1
-
-            try:
-                while in_flight:
-                    # 最古のページを順番に待つ（出力順序を保証）
-                    values = await in_flight.popleft()
-
-                    # 次ページの取得を先行開始しウィンドウを補充する
-                    if next_idx < len(start_positions):
-                        in_flight.append(asyncio.create_task(fetch_page(start_positions[next_idx])))
-                        next_idx += 1
-
-                    # このページを変換しながら逐次送出する
-                    for i, row in enumerate(values):
-                        prefix    = b"" if first_row else b","
-                        first_row = False
-                        # orjson.dumpsはbytesを返し非ASCIIをUTF-8でそのまま出力する
-                        yield prefix + orjson.dumps(convert_row(row, code_map))
-                        total_sent += 1
-
-                        # 8192行ごとにループへ制御を返す
-                        # （送信バイトの実送出・次ページ先読みを進めるため）
-                        if (i & 0x1FFF) == 0:
-                            await asyncio.sleep(0)
-
-                    # 送信済みページのメモリを即解放する
-                    del values
-            finally:
-                # クライアント切断時など、先読み中タスクをキャンセルしリークを防ぐ
-                for task in in_flight:
-                    task.cancel()
+                    # 8192行ごとにループへ制御を返す（実送出・先読みを進めるため）
+                    if (i & 0x1FFF) == 0:
+                        await asyncio.sleep(0)
+                del values
 
         # フッターに実際の送信件数を付加して閉じる
         yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
 
+    # ── CSVストリーム ────────────────────────────────────
+    async def stream_csv():
+        # 固定列を決め、BOM付きヘッダー行を送出する
+        columns = build_csv_columns(code_map)
+        buf     = io.StringIO()
+        writer  = csv.writer(buf)
+
+        writer.writerow(columns)
+        # 先頭にBOMを付与しExcelでの直接オープン時の文字化けを防ぐ
+        yield ("\ufeff" + buf.getvalue()).encode("utf-8")
+        buf.seek(0); buf.truncate(0)
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            async for values in iter_pages(client):
+                for i, row in enumerate(values):
+                    # 名称変換した辞書を固定列順に並べる（無い列は空欄）
+                    d = convert_row(row, code_map)
+                    writer.writerow([d.get(c, "") for c in columns])
+
+                    # 1024行ごとにバッファを送出してメモリを解放する
+                    if (i & 0x3FF) == 0:
+                        yield buf.getvalue().encode("utf-8")
+                        buf.seek(0); buf.truncate(0)
+                        await asyncio.sleep(0)
+
+                # ページ末でバッファを送出する
+                yield buf.getvalue().encode("utf-8")
+                buf.seek(0); buf.truncate(0)
+                del values
+
+    # ── 出力形式に応じて返す ─────────────────────────────
+    if output_format == "csv":
+        return StreamingResponse(stream_csv(), media_type="text/csv; charset=utf-8")
     return StreamingResponse(stream_json(), media_type="application/json")
