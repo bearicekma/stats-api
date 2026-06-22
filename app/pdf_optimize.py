@@ -28,7 +28,7 @@ def _pick_fontsize(n_chars: int) -> float:
 
 
 def optimize_scanned_pdf(pdf_bytes: bytes, text: str,
-                         dpi: int = 200, quality: int = 82) -> bytes:
+                         dpi: int = 250, quality: int = 88) -> bytes:
     # 各ページを画像化してJPEG再エンコード（軽量化）し、OCR全文を不可視テキスト層として重ねる
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = fitz.open()
