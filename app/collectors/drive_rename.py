@@ -11,6 +11,9 @@ import io
 import time
 from datetime import datetime, timezone, timedelta
 
+# スキャンPDFの軽量化＋不可視テキスト層（PyMuPDFのみ・依存追加なし）
+from app.pdf_optimize import is_scanned_pdf, optimize_scanned_pdf, verify_text_layer
+
 # ---- 設定値 ----
 TARGET_FOLDER_ID  = "141cGbdt8MalPRPP15tHjlED7DlZd24z9"  # 対象フォルダ
 RECENT_DAYS       = 3       # アップロードからこの日数以内のみ対象
@@ -54,7 +57,7 @@ def _list_target_pdfs(service):
     while True:
         resp = service.files().list(
             q=q,
-            fields="nextPageToken, files(id, name, createdTime, size)",
+            fields="nextPageToken, files(id, name, createdTime, size, appProperties)",
             pageSize=100,
             pageToken=page_token,
             orderBy="createdTime desc",
@@ -93,28 +96,28 @@ def _download_pdf_bytes(service, file_id):
     return buf.read()
 
 
-def _generate_headline(pdf_bytes):
-    # PDFを直接Geminiに渡して主要見出しを生成する。
-    # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
-    # 分次(PerMinute)など一時超過のみ短い待機後にリトライ。
+def _generate_headline_and_text(pdf_bytes):
+    # PDFを直接Geminiに渡し、「見出し（最大MAX_HEADLINES本）」と「本文全文」を
+    # 1回の呼び出しでJSON取得（OCR用の追加呼び出しをしない＝無料枠を温存）。
+    import json
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     prompt = (
-        "これは日本経済新聞の紙面PDFです。"
-        f"この紙面に含まれる主要な記事の見出しを、重要な順に最大{MAX_HEADLINES}本、"
-        "それぞれ簡潔に作ってください。\n"
-        "条件:\n"
-        "- 各見出しは20文字程度まで\n"
-        "- 記号・改行・番号は付けない\n"
-        "- 1行に1見出しだけを出力（説明文は不要）"
+        "これは新聞紙面のPDFです。次の2つをJSONで返してください。\n"
+        f"1) headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本の配列。"
+        "各20文字程度、記号・番号は付けない。\n"
+        "2) text: 紙面の本文をできるだけ忠実に書き起こした全文（検索用。"
+        "段組やレイアウトは無視してよい）。\n"
+        '出力は {"headlines": [...], "text": "..."} のJSONのみ。'
     )
     parts = [
         types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
         prompt,
     ]
+    config = types.GenerateContentConfig(response_mime_type="application/json")
 
     last_error = None
 
@@ -122,44 +125,43 @@ def _generate_headline(pdf_bytes):
         attempt = 0
         while True:
             try:
-                resp = client.models.generate_content(model=model, contents=parts)
-                text = (resp.text or "").strip()
-                if not text:
+                resp = client.models.generate_content(
+                    model=model, contents=parts, config=config
+                )
+                raw = (resp.text or "").strip()
+                if not raw:
                     last_error = f"{model}: 空応答"
-                    break  # 次の候補へ
-                # 行ごとに分解→記号/番号を除去→最大本数で「・」連結
-                lines = [ln.strip(" 　・-*0123456789.") for ln in text.splitlines() if ln.strip()]
-                lines = [ln for ln in lines if ln][:MAX_HEADLINES]
-                if not lines:
+                    break
+                raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                data = json.loads(raw)
+
+                heads = [str(h).strip(" 　・-*0123456789.")
+                         for h in (data.get("headlines") or []) if str(h).strip()]
+                heads = [h for h in heads if h][:MAX_HEADLINES]
+                if not heads:
                     last_error = f"{model}: 見出し抽出できず"
-                    break  # 次の候補へ
-                return "・".join(lines)
+                    break
+                headline  = "・".join(heads)
+                full_text = str(data.get("text") or "").strip()
+                return headline, full_text
 
             except Exception as e:
                 msg = str(e)
                 last_error = f"{model}: {msg}"
-
-                # 429以外（404など）→ このモデルでは無理、即次の候補へ
                 if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg:
                     break
-
-                # limit: 0（無料枠対象外/廃止）→ 即次の候補へ
                 if "limit: 0" in msg or "limit:0" in msg:
                     break
-
-                # 日次上限（PerDay）超過 → 今日は待っても無駄、即次の候補へ
                 if "PerDay" in msg:
                     break
-
-                # 分次（PerMinute）など一時的な超過 → 回数内なら待ってリトライ
                 if attempt < MAX_RPM_RETRY:
                     attempt += 1
                     time.sleep(RPM_RETRY_WAIT)
                     continue
                 else:
-                    break  # リトライ尽きた → 次の候補へ
+                    break
 
-    raise RuntimeError(last_error or "見出し生成失敗（全候補）")
+    raise RuntimeError(last_error or "見出し・全文の生成失敗（全候補）")
 
 
 def _sanitize(title):
@@ -208,6 +210,11 @@ def run_drive_rename():
             skipped += 1
             continue
 
+        # 既に最適化済み（appProperties）なら念のためスキップ（二重ガード）
+        if (f.get("appProperties") or {}).get("optimized") == "v1":
+            skipped += 1
+            continue
+
         # 件数上限に達したら、残りは未処理のまま次回へ
         if processed >= MAX_FILES_PER_RUN:
             skipped += 1
@@ -215,7 +222,7 @@ def run_drive_rename():
 
         try:
             pdf_bytes = _download_pdf_bytes(service, f["id"])
-            headline = _generate_headline(pdf_bytes)
+            headline, full_text = _generate_headline_and_text(pdf_bytes)
             if not headline:
                 failed.append({"name": name, "reason": "見出し生成失敗"})
                 processed += 1
@@ -224,8 +231,36 @@ def run_drive_rename():
             new_base = f"{date_part}_{_sanitize(headline)}"[:MAX_NAME_LEN]
             new_name = _unique_name(service, new_base)
 
-            service.files().update(fileId=f["id"], body={"name": new_name}).execute()
-            renamed.append({"from": name, "to": new_name})
+            # スキャンPDFのみ：軽量化＋不可視テキスト層を埋め込み、
+            # 検証OKなら「中身＋名前＋マーカー」を一括で上書き更新（ファイルIDは不変）
+            if is_scanned_pdf(pdf_bytes):
+                optimized = optimize_scanned_pdf(pdf_bytes, full_text)
+                if verify_text_layer(optimized):
+                    from googleapiclient.http import MediaIoBaseUpload
+                    media = MediaIoBaseUpload(
+                        io.BytesIO(optimized),
+                        mimetype="application/pdf", resumable=False,
+                    )
+                    service.files().update(
+                        fileId=f["id"],
+                        body={"name": new_name, "appProperties": {"optimized": "v1"}},
+                        media_body=media,
+                    ).execute()
+                    renamed.append({"from": name, "to": new_name,
+                                    "optimized": True, "bytes": len(optimized)})
+                else:
+                    # 検証失敗→中身は触らず名前だけ変更（原本を壊さない）
+                    service.files().update(
+                        fileId=f["id"], body={"name": new_name}
+                    ).execute()
+                    renamed.append({"from": name, "to": new_name, "optimized": False})
+            else:
+                # 非スキャン（テキストPDF等）→ 従来どおり名前だけ変更（画質を保つ）
+                service.files().update(
+                    fileId=f["id"], body={"name": new_name}
+                ).execute()
+                renamed.append({"from": name, "to": new_name, "optimized": False})
+
             processed += 1
         except Exception as e:
             failed.append({"name": name, "reason": str(e)})
