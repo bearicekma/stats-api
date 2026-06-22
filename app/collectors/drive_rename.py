@@ -109,8 +109,9 @@ def _generate_headline_and_text(pdf_bytes):
         "これは新聞紙面のPDFです。次の2つをJSONで返してください。\n"
         f"1) headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本の配列。"
         "各20文字程度、記号・番号は付けない。\n"
-        "2) text: 紙面の本文をできるだけ忠実に書き起こした全文（検索用。"
-        "段組やレイアウトは無視してよい）。\n"
+        "2) text: 紙面の本文をできるだけ忠実に書き起こした全文（検索用）。\n"
+        "縦書きの段組みです。各段を上から下へ読み切り、右の段から\n"
+        "左の段の順に1段ずつ処理し、段の途中で隣の段に移らないこと。\n"
         '出力は {"headlines": [...], "text": "..."} のJSONのみ。'
     )
     parts = [
@@ -135,7 +136,7 @@ def _generate_headline_and_text(pdf_bytes):
                 raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
                 data = json.loads(raw)
 
-                heads = [str(h).strip(" 　・-*0123456789.")
+                heads = [str(h).strip(" 　・-*")
                          for h in (data.get("headlines") or []) if str(h).strip()]
                 heads = [h for h in heads if h][:MAX_HEADLINES]
                 if not heads:
