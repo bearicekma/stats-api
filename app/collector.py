@@ -78,7 +78,11 @@ async def run_jma_collection():
     try:
         count = await asyncio.to_thread(collect_jma_nagano)
         print(f"✅ jma: {count}件")
-        _notify("jma_nagano", count)
+        # 通知方針: 成功(正常件数)時はメールを送らない。
+        # 例外は下のexceptで、0件は収集失敗とみなしてここでエラー通知する。
+        if count == 0:
+            _notify("jma_nagano", 0,
+                    error="取得件数が0件でした（天気APIの仕様変更やレスポンス異常の可能性）")
         return count
     except Exception as e:
         print(f"❌ エラー: jma: {e}")
