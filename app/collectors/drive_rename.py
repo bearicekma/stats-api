@@ -22,7 +22,7 @@ MAX_NAME_LEN      = 100     # ファイル名(日付含む)のおおよその上
 MAX_FILES_PER_RUN = 20      # 1回のrunで処理する最大件数（無料枠20/日の安全弁）
 
 # Geminiの候補モデル（無料枠で使える順。先頭から試す）
-GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash"]
+GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 MAX_RPM_RETRY  = 2          # 分次(RPM)一時超過時のリトライ回数
 RPM_RETRY_WAIT = 8          # リトライ前の待機秒数
 
