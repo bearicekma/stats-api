@@ -11,6 +11,7 @@
 
 import io
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -235,52 +236,83 @@ def _parse(raw: list) -> pd.DataFrame:
     return df.where(pd.notna(df), None)
 
 
+# ----- GCSアクセスのリトライ設定 -----
+_GCS_ATTEMPTS   = 3      # 最大試行回数
+_GCS_BASE_DELAY = 2.0    # バックオフ基準秒（待ち時間: 2秒→4秒）
+_GCS_TIMEOUT    = 30.0   # 1回あたりのHTTPタイムアウト秒
+
+
+def _gcs_with_retry(fn):
+    """GCS処理を毎回新しいstorage.Client()で実行し、失敗時は指数バックオフで再試行する。
+    SSL: UNEXPECTED_EOF 等の接続断は古いコネクション再利用が原因のため、リトライごとにclientを作り直す。"""
+    last_exc = None
+    for i in range(_GCS_ATTEMPTS):
+        try:
+            client = storage.Client()                 # 毎回新規生成（コネクションプールを使い回さない）
+            return fn(client)
+        except Exception as e:
+            last_exc = e
+            if i < _GCS_ATTEMPTS - 1:
+                wait = _GCS_BASE_DELAY * (2 ** i)      # 2秒 → 4秒
+                print(f"⚠ GCSアクセス失敗 ({i+1}/{_GCS_ATTEMPTS}): {e} → {wait:.0f}秒後に再試行")
+                time.sleep(wait)
+    raise last_exc                                     # 全回失敗時はそのまま送出（失敗メールで通知される）
+
+
 def _upsert_to_gcs(new_df: pd.DataFrame) -> None:
-    """(target_date, location)をキーにupsertしてGCSに保存する（蓄積型）"""
-    gcs       = storage.Client()
-    bucket    = gcs.bucket(BUCKET_NAME)
-    blob      = bucket.blob(GCS_PATH)
+    """(target_date, location)をキーにupsertしてGCSに保存する（蓄積型）。
+    GCSアクセスは_gcs_with_retryでラップし、SSL/接続断時はclientを作り直して再試行する。"""
     today_str = datetime.now(JST).date().isoformat()
 
-    if blob.exists():
-        buf = io.BytesIO()
-        blob.download_to_file(buf)
+    def _do(gcs):
+        # gcs はリトライごとに渡される新しい storage.Client()
+        bucket = gcs.bucket(BUCKET_NAME)
+        blob   = bucket.blob(GCS_PATH)
+
+        # 各GCS呼び出しは_GCS_TIMEOUT秒で打ち切り、組み込みリトライ(retry)は無効化する
+        # （回復は外側の_gcs_with_retryが新しいclientで担当するため）
+        if blob.exists(timeout=_GCS_TIMEOUT, retry=None):
+            buf = io.BytesIO()
+            blob.download_to_file(buf, timeout=_GCS_TIMEOUT, retry=None)
+            buf.seek(0)
+            existing = pd.read_parquet(buf)
+
+            # ⑦ 今日分の気温はGCS既存値を優先する（週間予報の値が正確なため）
+            existing_today = existing[
+                existing["target_date"].astype(str) == today_str
+            ].set_index("location")
+
+            today_mask = new_df["target_date"].astype(str) == today_str
+            for idx in new_df[today_mask].index:
+                loc = new_df.loc[idx, "location"]
+                if loc in existing_today.index:
+                    ex_max = existing_today.loc[loc, "temp_max"]
+                    ex_min = existing_today.loc[loc, "temp_min"]
+                    if pd.notna(ex_max):
+                        new_df.loc[idx, "temp_max"] = ex_max
+                    if pd.notna(ex_min):
+                        new_df.loc[idx, "temp_min"] = ex_min
+
+            # 新データと重複するキーを既存から除外して結合する
+            new_keys = set(zip(new_df["target_date"].astype(str), new_df["location"]))
+            existing["_key"] = existing["target_date"].astype(str) + "_" + existing["location"]
+            kept   = existing[~existing["_key"].isin(
+                {f"{d}_{l}" for d, l in new_keys}
+            )].drop("_key", axis=1)
+            result = pd.concat([kept, new_df], ignore_index=True)
+        else:
+            result = new_df
+
+        result = result.sort_values(["target_date", "location"]).reset_index(drop=True)
+
+        table = pa.Table.from_pandas(result, preserve_index=False)
+        buf   = io.BytesIO()
+        pq.write_table(table, buf)
         buf.seek(0)
-        existing = pd.read_parquet(buf)
+        blob.upload_from_file(buf, content_type="application/octet-stream",
+                              timeout=_GCS_TIMEOUT, retry=None)
 
-        # ⑦ 今日分の気温はGCS既存値を優先する（週間予報の値が正確なため）
-        existing_today = existing[
-            existing["target_date"].astype(str) == today_str
-        ].set_index("location")
-
-        today_mask = new_df["target_date"].astype(str) == today_str
-        for idx in new_df[today_mask].index:
-            loc = new_df.loc[idx, "location"]
-            if loc in existing_today.index:
-                ex_max = existing_today.loc[loc, "temp_max"]
-                ex_min = existing_today.loc[loc, "temp_min"]
-                if pd.notna(ex_max):
-                    new_df.loc[idx, "temp_max"] = ex_max
-                if pd.notna(ex_min):
-                    new_df.loc[idx, "temp_min"] = ex_min
-
-        # 新データと重複するキーを既存から除外して結合する
-        new_keys = set(zip(new_df["target_date"].astype(str), new_df["location"]))
-        existing["_key"] = existing["target_date"].astype(str) + "_" + existing["location"]
-        kept   = existing[~existing["_key"].isin(
-            {f"{d}_{l}" for d, l in new_keys}
-        )].drop("_key", axis=1)
-        result = pd.concat([kept, new_df], ignore_index=True)
-    else:
-        result = new_df
-
-    result = result.sort_values(["target_date", "location"]).reset_index(drop=True)
-
-    table = pa.Table.from_pandas(result, preserve_index=False)
-    buf   = io.BytesIO()
-    pq.write_table(table, buf)
-    buf.seek(0)
-    blob.upload_from_file(buf, content_type="application/octet-stream")
+    _gcs_with_retry(_do)
 
 
 def _format_line_message(df: pd.DataFrame) -> str:
