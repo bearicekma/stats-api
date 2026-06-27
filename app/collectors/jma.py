@@ -237,24 +237,26 @@ def _parse(raw: list) -> pd.DataFrame:
 
 
 # ----- GCSアクセスのリトライ設定 -----
-_GCS_ATTEMPTS   = 3      # 最大試行回数
-_GCS_BASE_DELAY = 2.0    # バックオフ基準秒（待ち時間: 2秒→4秒）
-_GCS_TIMEOUT    = 30.0   # 1回あたりのHTTPタイムアウト秒
+# 失敗時の待機スケジュール(秒)。要素数+1 = 最大試行回数。
+# 30→60→120→120 で計5回・約5.5分粘る（数分続くネットワーク断に備える）。
+_GCS_BACKOFF = [30, 60, 120, 120]
+_GCS_TIMEOUT = 30.0   # 1回あたりのHTTPタイムアウト秒
 
 
 def _gcs_with_retry(fn):
-    """GCS処理を毎回新しいstorage.Client()で実行し、失敗時は指数バックオフで再試行する。
-    SSL: UNEXPECTED_EOF 等の接続断は古いコネクション再利用が原因のため、リトライごとにclientを作り直す。"""
+    """GCS処理を毎回新しいstorage.Client()で実行し、失敗時は_GCS_BACKOFFの間隔で再試行する。
+    SSL: UNEXPECTED_EOF 等の接続断は新しい接続でも数分続くことがあるため、間隔を空けて粘る。"""
+    attempts = len(_GCS_BACKOFF) + 1
     last_exc = None
-    for i in range(_GCS_ATTEMPTS):
+    for i in range(attempts):
         try:
             client = storage.Client()                 # 毎回新規生成（コネクションプールを使い回さない）
             return fn(client)
         except Exception as e:
             last_exc = e
-            if i < _GCS_ATTEMPTS - 1:
-                wait = _GCS_BASE_DELAY * (2 ** i)      # 2秒 → 4秒
-                print(f"⚠ GCSアクセス失敗 ({i+1}/{_GCS_ATTEMPTS}): {e} → {wait:.0f}秒後に再試行")
+            if i < len(_GCS_BACKOFF):
+                wait = _GCS_BACKOFF[i]
+                print(f"⚠ GCSアクセス失敗 ({i+1}/{attempts}): {e} → {wait}秒後に再試行")
                 time.sleep(wait)
     raise last_exc                                     # 全回失敗時はそのまま送出（失敗メールで通知される）
 

@@ -101,5 +101,18 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
             "example": "/collect?target=jma_nagano",
         })
 
+    # jma_naganoは同期実行する。
+    # GCS接続断に備えて関数内で最大約5.5分リトライするため、バックグラウンドではなく
+    # リクエスト内で完走させ、結果に応じて200/500を返す（Cloud Run timeout / Scheduler
+    # attempt-deadline を 600s に設定済み。失敗時メールは関数内で1通だけ送られる）。
+    if target == "jma_nagano":
+        count = await func()
+        if count and count > 0:
+            return {"message": f"{target} 収集成功", "count": count, "timestamp": str(datetime.now())}
+        return JSONResponse(status_code=500, content={
+            "error":     f"{target} 収集失敗（リトライ上限まで到達）",
+            "timestamp": str(datetime.now()),
+        })
+
     background_tasks.add_task(func)
     return {"message": f"{target} の収集を開始しました", "timestamp": str(datetime.now())}
