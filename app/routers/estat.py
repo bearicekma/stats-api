@@ -217,8 +217,8 @@ async def estat_pass(stats_data_id: str, request: Request):
     - `stats_data_id` (str) e-Statの統計表ID。例: 0003427113（消費者物価指数）
 
     **出力形式（任意）:**
-    - `format=csv` (既定) CSV形式（UTF-8 BOM付き）で返します。大量データに最適で軽量です
-    - `format=json` JSON形式で返します（ネスト構造が必要な場合）
+    - `format=json` (既定) JSON形式で返します
+    - `format=csv` CSV形式（UTF-8 BOM付き）で返します。大量データは軽量・高速です
 
     **クエリパラメータ（任意・e-Stat getStatsData にそのまま転送）:**
     - `cdArea` (str) 地域コード。カンマ区切りで複数指定可。例: 00000,13A01
@@ -248,7 +248,7 @@ async def estat_pass(stats_data_id: str, request: Request):
     app_id = os.environ["ESTAT_APP_ID"]
 
     # 出力形式を判定する（既定はjson）
-    output_format = request.query_params.get("format", "csv").lower()
+    output_format = request.query_params.get("format", "json").lower()
 
     # ベースパラメータを構築する
     # 予約パラメータ（limit等）はユーザー指定を除外し、内部のページング制御を守る
@@ -376,6 +376,6 @@ async def estat_pass(stats_data_id: str, request: Request):
                 del values
 
     # ── 出力形式に応じて返す（既定はCSV） ────────────────
-    if output_format == "json":
-        return StreamingResponse(stream_json(), media_type="application/json")
-    return StreamingResponse(stream_csv(), media_type="text/csv; charset=utf-8")
+    if output_format == "csv":
+        return StreamingResponse(stream_csv(), media_type="text/csv; charset=utf-8")
+    return StreamingResponse(stream_json(), media_type="application/json")
