@@ -15,6 +15,10 @@
     <div class="flex items-center gap-3 mb-4">
       <button id="reload"
               class="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-sm">再読み込み</button>
+      <button id="favToggle"
+              class="border border-amber-400 text-amber-600 px-4 py-1.5 rounded-lg text-sm">
+        ★のみ表示
+      </button>
       <span id="status" class="text-sm text-slate-500"></span>
     </div>
 
@@ -23,6 +27,9 @@
 
 <script>
 const $ = id => document.getElementById(id);
+
+let allFiles = [];       // /files から取得した全件
+let favOnly  = false;    // ★のみ表示フラグ
 
 // ファイル名先頭8桁(YYYYMMDD)から「YYYY年MM月」キーと表示日付を取り出す
 function parseDate(name) {
@@ -37,7 +44,32 @@ function viewUrl(id) {
   return `https://drive.google.com/file/d/${id}/view`;
 }
 
-function render(files) {
+// お気に入りをトグルするAPI呼び出し
+async function toggleFavorite(id, btnEl) {
+  btnEl.disabled = true;
+  try {
+    const res = await fetch("/drive_rename/favorite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.detail || json.error);
+
+    // ローカルの状態を更新して再描画
+    const f = allFiles.find(x => x.id === id);
+    if (f) f.favorite = json.favorite;
+    render();
+  } catch (e) {
+    alert("お気に入り更新に失敗しました: " + e.message);
+  } finally {
+    btnEl.disabled = false;
+  }
+}
+
+function render() {
+  const files = favOnly ? allFiles.filter(f => f.favorite) : allFiles;
+
   // 年月キーでグルーピング
   const groups = {};
   for (const f of files) {
@@ -45,7 +77,6 @@ function render(files) {
     (groups[ym] = groups[ym] || []).push({ ...f, _day: day });
   }
 
-  // 年月キーを新しい順にソート（「その他」は末尾）
   const keys = Object.keys(groups).sort((a, b) => {
     if (a === "その他") return 1;
     if (b === "その他") return -1;
@@ -53,16 +84,19 @@ function render(files) {
   });
 
   const html = keys.map(ym => {
-    // 各グループ内はファイル名降順（新しい日付が上）
     const items = groups[ym].sort((a, b) => b.name.localeCompare(a.name));
     const rows = items.map(f => {
       const badge = f.renamed
         ? ""
         : `<span class="ml-2 text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">未処理</span>`;
       const day = f._day ? `<span class="text-slate-400 text-xs mr-2">${f._day}</span>` : "";
+      const star = f.favorite ? "★" : "☆";
+      const starClass = f.favorite ? "text-amber-500" : "text-slate-300";
       return `
         <li class="flex items-center justify-between py-2 border-b border-slate-100">
-          <div class="min-w-0">
+          <div class="min-w-0 flex items-center">
+            <button class="star-btn ${starClass} text-lg mr-2 shrink-0" data-id="${f.id}"
+                    title="お気に入り切替">${star}</button>
             ${day}
             <span class="text-sm break-all">${f.name}</span>
             ${badge}
@@ -81,7 +115,12 @@ function render(files) {
       </div>`;
   }).join("");
 
-  $("list").innerHTML = html || `<p class="text-slate-500">ファイルがありません</p>`;
+  $("list").innerHTML = html || `<p class="text-slate-500">${favOnly ? "お気に入りがありません" : "ファイルがありません"}</p>`;
+
+  // ☆/★ボタンにイベントを付与
+  document.querySelectorAll(".star-btn").forEach(btn => {
+    btn.addEventListener("click", () => toggleFavorite(btn.dataset.id, btn));
+  });
 }
 
 async function load() {
@@ -90,7 +129,8 @@ async function load() {
     const res = await fetch("/drive_rename/files");
     const json = await res.json();
     if (json.error) throw new Error(json.detail || json.error);
-    render(json.files || []);
+    allFiles = json.files || [];
+    render();
     $("status").textContent = `${json.count}件`;
   } catch (e) {
     $("status").textContent = "読み込み失敗: " + e.message;
@@ -98,6 +138,15 @@ async function load() {
 }
 
 $("reload").addEventListener("click", load);
+$("favToggle").addEventListener("click", () => {
+  favOnly = !favOnly;
+  $("favToggle").className = favOnly
+    ? "bg-amber-500 text-white px-4 py-1.5 rounded-lg text-sm"
+    : "border border-amber-400 text-amber-600 px-4 py-1.5 rounded-lg text-sm";
+  $("favToggle").textContent = favOnly ? "★のみ表示中" : "★のみ表示";
+  render();
+});
+
 load();  // 初回自動読み込み
 </script>
 </body>

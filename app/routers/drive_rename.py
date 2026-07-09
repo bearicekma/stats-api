@@ -1,20 +1,25 @@
 # Google Drive PDF 自動リネーム エンドポイント
-#  POST /drive_rename/run   : 対象フォルダのPDFを走査してリネーム実行
-#  GET  /drive_rename/files : フォルダ内PDF一覧をJSONで返す
-#  GET  /drive_rename/view  : 年月別グルーピングのHTML一覧ページ
+#  POST /drive_rename/run       : 対象フォルダのPDFを走査してリネーム実行
+#  GET  /drive_rename/files     : フォルダ内PDF一覧をJSONで返す（お気に入り状態を含む）
+#  GET  /drive_rename/view      : 年月別グルーピングのHTML一覧ページ
+#  POST /drive_rename/favorite  : お気に入りのON/OFFをトグル
 
 import asyncio
 from pathlib           import Path
 from datetime          import datetime
 from fastapi           import APIRouter
 from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic           import BaseModel
 
-from app.collectors.drive_rename import run_drive_rename, list_drive_pdfs
+from app.collectors.drive_rename import run_drive_rename, list_drive_pdfs, toggle_favorite
 
 router = APIRouter(prefix="/drive_rename", tags=["Drive Rename"])
 
-# HTMLテンプレートのパス（/ocr, /guide と同じ静的配信パターン）
 FILES_HTML = Path(__file__).parent.parent / "templates" / "drive_files.html"
+
+
+class FavoriteRequest(BaseModel):
+    id: str  # DriveファイルID
 
 
 @router.post("/run", summary="Drive PDF 自動リネーム実行")
@@ -38,7 +43,6 @@ async def drive_rename_run():
     """
     result = await asyncio.to_thread(run_drive_rename)
 
-    # 失敗時のみGmail通知（既存のsend_gmailを利用）
     if result["failed"]:
         from app.notifier import send_gmail
         lines = "\n".join(f"・{x['name']}: {x['reason']}" for x in result["failed"])
@@ -65,6 +69,7 @@ async def drive_rename_files():
     - created_time (str) アップロード日時(RFC3339)
     - size (int|null)    バイト数
     - renamed (bool)     リネーム済みか（YYYYMMDD未処理形式でなければtrue）
+    - favorite (bool)    お気に入り登録されているか
     """
     try:
         files = await asyncio.to_thread(list_drive_pdfs)
@@ -72,6 +77,28 @@ async def drive_rename_files():
     except Exception as e:
         return JSONResponse(status_code=500, content={
             "error": "一覧取得に失敗しました",
+            "detail": str(e),
+        })
+
+
+@router.post("/favorite", summary="お気に入りのON/OFFをトグル")
+async def drive_rename_favorite(body: FavoriteRequest):
+    """
+    指定したファイルのお気に入り状態をトグルします。
+
+    リクエストボディ:
+    - id (str) DriveファイルID
+
+    レスポンス:
+    - id (str)       対象ファイルID
+    - favorite (bool) トグル後の状態
+    """
+    try:
+        new_state = await asyncio.to_thread(toggle_favorite, body.id)
+        return {"id": body.id, "favorite": new_state}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "error": "お気に入り更新に失敗しました",
             "detail": str(e),
         })
 

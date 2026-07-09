@@ -4,15 +4,14 @@
 #  - PDFを直接Geminiに渡して見出しを生成し「YYYYMMDD_見出し」にリネーム
 #  - 認証は OAuth 2.0 ユーザー委任(refresh_token)、値は環境変数から取得
 #  - Geminiは候補モデルを順に試すフォールバック方式（廃止/日次上限は即次へ）
+#  - お気に入り状態はGCSにJSONで永続化（drive_rename/favorites.json）
 
 import os
 import re
 import io
 import time
+import json
 from datetime import datetime, timezone, timedelta
-
-# スキャンPDFの軽量化＋不可視テキスト層（PyMuPDFのみ・依存追加なし）
-from app.pdf_optimize import is_scanned_pdf, optimize_scanned_pdf, verify_text_layer
 
 # ---- 設定値 ----
 TARGET_FOLDER_ID  = "141cGbdt8MalPRPP15tHjlED7DlZd24z9"  # 対象フォルダ
@@ -22,9 +21,13 @@ MAX_NAME_LEN      = 100     # ファイル名(日付含む)のおおよその上
 MAX_FILES_PER_RUN = 20      # 1回のrunで処理する最大件数（無料枠20/日の安全弁）
 
 # Geminiの候補モデル（無料枠で使える順。先頭から試す）
-GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash"]
 MAX_RPM_RETRY  = 2          # 分次(RPM)一時超過時のリトライ回数
 RPM_RETRY_WAIT = 8          # リトライ前の待機秒数
+
+# お気に入り情報のGCS保存先
+GCS_BUCKET_NAME    = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
+FAVORITES_GCS_PATH = "drive_rename/favorites.json"
 
 # 未処理ファイル名の判定：YYYYMMDD または YYYYMMDD (n)
 _NAME_PATTERN = re.compile(r"^(\d{8})(?:\s*\(\d+\))?$")
@@ -57,7 +60,7 @@ def _list_target_pdfs(service):
     while True:
         resp = service.files().list(
             q=q,
-            fields="nextPageToken, files(id, name, createdTime, size, appProperties)",
+            fields="nextPageToken, files(id, name, createdTime, size)",
             pageSize=100,
             pageToken=page_token,
             orderBy="createdTime desc",
@@ -96,29 +99,28 @@ def _download_pdf_bytes(service, file_id):
     return buf.read()
 
 
-def _generate_headline_and_text(pdf_bytes):
-    # PDFを直接Geminiに渡し、「見出し（最大MAX_HEADLINES本）」と「本文全文」を
-    # 1回の呼び出しでJSON取得（OCR用の追加呼び出しをしない＝無料枠を温存）。
-    import json
+def _generate_headline(pdf_bytes):
+    # PDFを直接Geminiに渡して主要見出しを生成する。
+    # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
+    # 分次(PerMinute)など一時超過のみ短い待機後にリトライ。
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     prompt = (
-        "これは新聞紙面のPDFです。次の2つをJSONで返してください。\n"
-        f"1) headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本の配列。"
-        "各20文字程度、記号・番号は付けない。\n"
-        "2) text: 紙面の本文をできるだけ忠実に書き起こした全文（検索用）。\n"
-        "縦書きの段組みです。各段を上から下へ読み切り、右の段から\n"
-        "左の段の順に1段ずつ処理し、段の途中で隣の段に移らないこと。\n"
-        '出力は {"headlines": [...], "text": "..."} のJSONのみ。'
+        "これは日本経済新聞の紙面PDFです。"
+        f"この紙面に含まれる主要な記事の見出しを、重要な順に最大{MAX_HEADLINES}本、"
+        "それぞれ簡潔に作ってください。\n"
+        "条件:\n"
+        "- 各見出しは20文字程度まで\n"
+        "- 記号・改行・番号は付けない\n"
+        "- 1行に1見出しだけを出力（説明文は不要）"
     )
     parts = [
         types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
         prompt,
     ]
-    config = types.GenerateContentConfig(response_mime_type="application/json")
 
     last_error = None
 
@@ -126,43 +128,43 @@ def _generate_headline_and_text(pdf_bytes):
         attempt = 0
         while True:
             try:
-                resp = client.models.generate_content(
-                    model=model, contents=parts, config=config
-                )
-                raw = (resp.text or "").strip()
-                if not raw:
+                resp = client.models.generate_content(model=model, contents=parts)
+                text = (resp.text or "").strip()
+                if not text:
                     last_error = f"{model}: 空応答"
-                    break
-                raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                data = json.loads(raw)
-
-                heads = [str(h).strip(" 　・-*")
-                         for h in (data.get("headlines") or []) if str(h).strip()]
-                heads = [h for h in heads if h][:MAX_HEADLINES]
-                if not heads:
+                    break  # 次の候補へ
+                lines = [ln.strip(" 　・-*0123456789.") for ln in text.splitlines() if ln.strip()]
+                lines = [ln for ln in lines if ln][:MAX_HEADLINES]
+                if not lines:
                     last_error = f"{model}: 見出し抽出できず"
-                    break
-                headline  = "・".join(heads)
-                full_text = str(data.get("text") or "").strip()
-                return headline, full_text
+                    break  # 次の候補へ
+                return "・".join(lines)
 
             except Exception as e:
                 msg = str(e)
                 last_error = f"{model}: {msg}"
+
+                # 429以外（404・503など）→ このモデルでは無理、即次の候補へ
                 if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg:
                     break
+
+                # limit: 0（無料枠対象外/廃止）→ 即次の候補へ
                 if "limit: 0" in msg or "limit:0" in msg:
                     break
+
+                # 日次上限（PerDay）超過 → 今日は待っても無駄、即次の候補へ
                 if "PerDay" in msg:
                     break
+
+                # 分次（PerMinute）など一時的な超過 → 回数内なら待ってリトライ
                 if attempt < MAX_RPM_RETRY:
                     attempt += 1
                     time.sleep(RPM_RETRY_WAIT)
                     continue
                 else:
-                    break
+                    break  # リトライ尽きた → 次の候補へ
 
-    raise RuntimeError(last_error or "見出し・全文の生成失敗（全候補）")
+    raise RuntimeError(last_error or "見出し生成失敗（全候補）")
 
 
 def _sanitize(title):
@@ -189,6 +191,50 @@ def _unique_name(service, base):
         n += 1
 
 
+def _get_gcs_bucket():
+    # お気に入りJSON保存用のGCSバケットを返す
+    from google.cloud import storage
+    client = storage.Client()
+    return client.bucket(GCS_BUCKET_NAME)
+
+
+def _load_favorites() -> set:
+    # GCSからお気に入りID一覧を読み込む（未作成なら空集合）
+    bucket = _get_gcs_bucket()
+    blob = bucket.blob(FAVORITES_GCS_PATH)
+    if not blob.exists():
+        return set()
+    try:
+        data = json.loads(blob.download_as_text())
+        return set(data.get("favorite_ids", []))
+    except Exception as e:
+        print(f"⚠️ favorites.json 読み込み失敗: {e}")
+        return set()
+
+
+def _save_favorites(favorite_ids: set):
+    # お気に入りID一覧をGCSに保存する
+    bucket = _get_gcs_bucket()
+    blob = bucket.blob(FAVORITES_GCS_PATH)
+    blob.upload_from_string(
+        json.dumps({"favorite_ids": sorted(favorite_ids)}, ensure_ascii=False),
+        content_type="application/json",
+    )
+
+
+def toggle_favorite(file_id: str) -> bool:
+    # 指定ファイルのお気に入りをトグルし、トグル後の状態(True=お気に入り)を返す
+    favorites = _load_favorites()
+    if file_id in favorites:
+        favorites.discard(file_id)
+        new_state = False
+    else:
+        favorites.add(file_id)
+        new_state = True
+    _save_favorites(favorites)
+    return new_state
+
+
 def run_drive_rename():
     # メイン処理：対象PDFを走査してリネーム。結果をdictで返す
     service = _get_drive_service()
@@ -211,11 +257,6 @@ def run_drive_rename():
             skipped += 1
             continue
 
-        # 既に最適化済み（appProperties）なら念のためスキップ（二重ガード）
-        if (f.get("appProperties") or {}).get("optimized") == "v1":
-            skipped += 1
-            continue
-
         # 件数上限に達したら、残りは未処理のまま次回へ
         if processed >= MAX_FILES_PER_RUN:
             skipped += 1
@@ -223,7 +264,7 @@ def run_drive_rename():
 
         try:
             pdf_bytes = _download_pdf_bytes(service, f["id"])
-            headline, full_text = _generate_headline_and_text(pdf_bytes)
+            headline = _generate_headline(pdf_bytes)
             if not headline:
                 failed.append({"name": name, "reason": "見出し生成失敗"})
                 processed += 1
@@ -232,36 +273,8 @@ def run_drive_rename():
             new_base = f"{date_part}_{_sanitize(headline)}"[:MAX_NAME_LEN]
             new_name = _unique_name(service, new_base)
 
-            # スキャンPDFのみ：軽量化＋不可視テキスト層を埋め込み、
-            # 検証OKなら「中身＋名前＋マーカー」を一括で上書き更新（ファイルIDは不変）
-            if is_scanned_pdf(pdf_bytes):
-                optimized = optimize_scanned_pdf(pdf_bytes, full_text)
-                if verify_text_layer(optimized):
-                    from googleapiclient.http import MediaIoBaseUpload
-                    media = MediaIoBaseUpload(
-                        io.BytesIO(optimized),
-                        mimetype="application/pdf", resumable=False,
-                    )
-                    service.files().update(
-                        fileId=f["id"],
-                        body={"name": new_name, "appProperties": {"optimized": "v1"}},
-                        media_body=media,
-                    ).execute()
-                    renamed.append({"from": name, "to": new_name,
-                                    "optimized": True, "bytes": len(optimized)})
-                else:
-                    # 検証失敗→中身は触らず名前だけ変更（原本を壊さない）
-                    service.files().update(
-                        fileId=f["id"], body={"name": new_name}
-                    ).execute()
-                    renamed.append({"from": name, "to": new_name, "optimized": False})
-            else:
-                # 非スキャン（テキストPDF等）→ 従来どおり名前だけ変更（画質を保つ）
-                service.files().update(
-                    fileId=f["id"], body={"name": new_name}
-                ).execute()
-                renamed.append({"from": name, "to": new_name, "optimized": False})
-
+            service.files().update(fileId=f["id"], body={"name": new_name}).execute()
+            renamed.append({"from": name, "to": new_name})
             processed += 1
         except Exception as e:
             failed.append({"name": name, "reason": str(e)})
@@ -271,9 +284,11 @@ def run_drive_rename():
 
 
 def list_drive_pdfs():
-    # 一覧表示用：フォルダ内PDFをJSON向けに整形して返す
+    # 一覧表示用：フォルダ内PDFをJSON向けに整形して返す（お気に入り状態を含む）
     service = _get_drive_service()
     files = _list_target_pdfs(service)
+    favorites = _load_favorites()
+
     out = []
     for f in files:
         name = f["name"]
@@ -284,5 +299,6 @@ def list_drive_pdfs():
             "created_time": f["createdTime"],
             "size":         int(f["size"]) if f.get("size") else None,
             "renamed":      _NAME_PATTERN.match(base) is None,
+            "favorite":     f["id"] in favorites,
         })
     return out
