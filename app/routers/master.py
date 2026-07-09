@@ -2,6 +2,7 @@
 # /master/_M_pref     : 都道府県マスタ
 # /master/_M_city     : 市区町村マスタ
 # /master/_M_calendar : カレンダーマスタ（祝日・平日判定）
+# /master/_M_country  : 国名マスタ（財務省貿易統計 統計国名符号表ベース）
 
 from datetime import datetime
 
@@ -38,6 +39,7 @@ async def get_master(collection_name: str, request: Request):
     - `_M_pref` 都道府県マスタ（47都道府県）
     - `_M_city` 市区町村マスタ（全国市区町村）
     - `_M_calendar` カレンダーマスタ（祝日・平日判定、1950年〜）
+    - `_M_country` 国名マスタ（財務省貿易統計 統計国名符号表ベース）
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
@@ -70,6 +72,13 @@ async def get_master(collection_name: str, request: Request):
     - `holiday_only` (任意) `true` で祝日のみ取得
     - `weekday` (任意) 曜日コードで絞込（0=月〜6=日）。例: `0`
 
+    **_M_country のレスポンスフィールド:**
+    - `code` (string) 国名符号（3桁、財務省貿易統計ベース）
+    - `name` (string) 国名（日本語）
+    - `continent` (string) 所属エリア（大陸6区分）
+    - `sub_region` (string) 地理圏の詳細区分（該当なしはnull）
+    - `note` (string) 備考（該当なしはnull）
+
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
@@ -77,6 +86,7 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_calendar?year=2026&holiday_only=true` 2026年の祝日一覧
     - `/master/_M_calendar?from=2026-04-01&to=2026-06-30` 期間指定
     - `/master/_M_calendar?weekday=0&year=2026` 2026年の月曜日一覧
+    - `/master/_M_country` 国名マスタ一覧
     """
     tmp_path = None
     try:
@@ -111,6 +121,7 @@ async def get_master(collection_name: str, request: Request):
             "_M_calendar": "DATE",
             "_M_city":     "code_5_digit",
             "_M_pref":     "code",
+            "_M_country":  "code",
         }
         order_col = order_map.get(collection_name)
         order_by  = f"ORDER BY {order_col}" if order_col else ""
