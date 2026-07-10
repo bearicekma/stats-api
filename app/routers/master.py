@@ -43,15 +43,19 @@ async def get_master(collection_name: str, request: Request):
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
-    - `name` (string) 都道府県名
+    - `code_5_digit` (string) 都道府県コード（5桁）
+    - `code_6_digit` (string) 都道府県コード（6桁、検査数字付き）
+    - `pref_name` (string) 都道府県名（例: 青森県）
+    - `name_plain` (string) 都道府県名・接尾辞なし（例: 青森）
+    - `region` (string) 地方区分（例: 東北、関東）
 
     **_M_city のレスポンスフィールド:**
     - `code_5_digit` (string) 市区町村コード（5桁）
     - `code_6_digit` (string) 市区町村コード（6桁、検査数字付き）
-    - `name` (string) 市区町村名
-    - `name_unique` (string) 重複市区町村名に `.` を付加した一意名称
+    - `name` (string) 市区町村名（同名の場合、他都道府県と重複あり）
     - `pref_code` (string) 都道府県コード（2桁）
     - `pref_name` (string) 都道府県名
+    - `city_name` (string) 重複市区町村名に `.` を付加した一意名称
 
     **_M_calendar のレスポンスフィールド:**
     - `DATE` (string) 日付（YYYY-MM-DD）
@@ -74,7 +78,7 @@ async def get_master(collection_name: str, request: Request):
 
     **_M_country のレスポンスフィールド:**
     - `code` (string) 国名符号（3桁、財務省貿易統計ベース）
-    - `name` (string) 国名（日本語）
+    - `country_name` (string) 国名（日本語）
     - `continent` (string) 所属エリア（大陸6区分）
     - `sub_region` (string) 地理圏の詳細区分（該当なしはnull）
     - `note` (string) 備考（該当なしはnull）
