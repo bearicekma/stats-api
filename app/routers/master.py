@@ -3,6 +3,7 @@
 # /master/_M_city     : 市区町村マスタ
 # /master/_M_calendar : カレンダーマスタ（祝日・平日判定）
 # /master/_M_country  : 国名マスタ（財務省貿易統計 統計国名符号表ベース）
+# /master/_M_zairyu_shikaku : 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
 
 from datetime import datetime
 
@@ -40,6 +41,7 @@ async def get_master(collection_name: str, request: Request):
     - `_M_city` 市区町村マスタ（全国市区町村）
     - `_M_calendar` カレンダーマスタ（祝日・平日判定、1950年〜）
     - `_M_country` 国名マスタ（財務省貿易統計 統計国名符号表ベース）
+    - `_M_zairyu_shikaku` 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
@@ -83,6 +85,14 @@ async def get_master(collection_name: str, request: Request):
     - `sub_region` (string) 地理圏の詳細区分（該当なしはnull）
     - `note` (string) 備考（該当なしはnull）
 
+    **_M_zairyu_shikaku のレスポンスフィールド:**
+    - `code` (string) 在留資格コード（4桁、e-Stat公式分類コード）
+    - `zairyu_shikaku_name` (string) 在留資格正式名称
+    - `name_base` (string) 集計用グルーピング名（技能実習／高度専門職／特定技能をまとめる）
+    - `sub_type` (string) 号・区分（例: 1号イ）。区分なしはnull
+    - `category_major` (string) 大分類（就労系／身分・地位系／非就労系／特定活動／特別永住者）
+    - `sort_order` (int) 表示順（五十音順）
+
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
@@ -91,6 +101,7 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_calendar?from=2026-04-01&to=2026-06-30` 期間指定
     - `/master/_M_calendar?weekday=0&year=2026` 2026年の月曜日一覧
     - `/master/_M_country` 国名マスタ一覧
+    - `/master/_M_zairyu_shikaku` 在留資格マスタ一覧
     """
     tmp_path = None
     try:
@@ -126,6 +137,7 @@ async def get_master(collection_name: str, request: Request):
             "_M_city":     "code_5_digit",
             "_M_pref":     "code",
             "_M_country":  "code",
+            "_M_zairyu_shikaku": "sort_order",
         }
         order_col = order_map.get(collection_name)
         order_by  = f"ORDER BY {order_col}" if order_col else ""
