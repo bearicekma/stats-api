@@ -1,329 +1,441 @@
+# MCPサーバー定義
+# stats-api の各エンドポイントを Claude から呼べるツールとして公開する。
+# 自分自身のFastAPIアプリを localhost 経由で呼ぶ構成（同一プロセス内）。
 
 import json
 import os
-from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Annotated, Optional
+
 import httpx
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings  # 追加
+from mcp.server.transport_security import TransportSecuritySettings
 
-# --- 定数 ---
-# 自分自身のベースURL（Cloud Run環境変数から取得、ローカルはlocalhost）
-BASE_URL = os.getenv("STATS_API_BASE_URL", "http://localhost:8080")
-HTTP_TIMEOUT = 30.0
+# --- 設定 ---
+PORT         = os.getenv("PORT", "8080")
+BASE_URL     = f"http://127.0.0.1:{PORT}"
+HTTP_TIMEOUT = 120.0      # EDINETの範囲検索など長時間かかる処理に対応
+MAX_CHARS    = 80000      # Claudeのコンテキストを守るための応答上限
 
-# FastMCPサーバー初期化
-# streamable_httpではなくSSEトランスポートを使う
+# stateless_http: セッション管理不要（Cloud Run向き）
+# json_response : SSEストリームを使わずJSONで返す（GZipMiddlewareと競合しない）
+# transport_security: Cloud RunのHostヘッダーで弾かれないようDNSリバインディング保護を無効化
 mcp = FastMCP(
-    "stats_api_mcp",
+    "stats_api",
+    stateless_http=True,
+    json_response=True,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=False
-    )
+    ),
 )
 
 
-# --- 共通HTTPクライアント ---
-async def _get(path: str, params: dict = None) -> dict:
-    """stats-apiの内部エンドポイントをGETで呼び出す共通関数"""
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(f"{BASE_URL}{path}", params=params)
-        resp.raise_for_status()
-        return resp.json()
+# --- 共通処理 ---
+async def _get(path: str, params: dict | None = None) -> str:
+    """内部エンドポイントをGETで呼び、JSON文字列を返す"""
+    try:
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            r = await client.get(f"{BASE_URL}{path}", params=clean)
+            r.raise_for_status()
+            text = json.dumps(r.json(), ensure_ascii=False)
+    except httpx.HTTPStatusError as e:
+        return f"Error {e.response.status_code}: {e.response.text[:500]}"
+    except httpx.TimeoutException:
+        return "Error: タイムアウト。取得期間や条件を絞って再実行してください。"
+    except Exception as e:
+        return f"Error: {type(e).__name__}: {e}"
+
+    if len(text) > MAX_CHARS:
+        return (
+            text[:MAX_CHARS]
+            + f"\n\n[切り詰め] 応答が大きすぎます（全{len(text):,}文字）。"
+              "期間・地域・品目などで絞り込んで再取得してください。"
+        )
+    return text
 
 
-def _handle_error(e: Exception) -> str:
-    """エラーをClaudeが理解しやすいメッセージに変換"""
-    if isinstance(e, httpx.HTTPStatusError):
-        return f"Error {e.response.status_code}: {e.response.text}"
-    if isinstance(e, httpx.TimeoutException):
-        return "Error: リクエストがタイムアウトしました。期間を絞るか、再試行してください。"
-    return f"Error: {type(e).__name__}: {e}"
+def _extra(extra_params: Optional[str]) -> dict:
+    """JSON文字列で渡された追加パラメータをdictに変換する"""
+    return json.loads(extra_params) if extra_params else {}
 
 
 # =============================================================================
-# ツール定義
+# 仕様確認
 # =============================================================================
 
-# --- GCS+DuckDB 保存データ ---
+@mcp.tool()
+async def get_api_spec() -> str:
+    """stats-api の全エンドポイント仕様（OpenAPI）を取得する。
 
-class StatsGetCollectionInput(BaseModel):
-    """stats_get_collection のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    collection_name: str = Field(
-        ..., description="コレクション名。例: 'cpi_nagano'、'boj_exchange'"
-    )
-
-@mcp.tool(
-    name="stats_get_collection",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def stats_get_collection(params: StatsGetCollectionInput) -> str:
-    """GCS+DuckDBに保存された統計コレクションデータを取得する。
-
-    定期収集・蓄積済みのデータ（e-Stat・日銀等）を返す。
-    利用可能なコレクション名は事前に確認が必要。
-
-    Args:
-        params: collection_name (str) - 取得するコレクション名
-
-    Returns:
-        str: JSON形式のデータ配列
+    各ツールのパラメータ詳細や、ツール化されていないエンドポイントを
+    調べたいときに使う。ルーター追加時もここに自動反映される。
     """
-    try:
-        data = await _get(f"/stats/{params.collection_name}")
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get("/openapi.json")
 
 
-# --- マスタデータ ---
+# =============================================================================
+# 汎用（GCS保存データ / マスタ）
+# =============================================================================
 
-class StatsGetMasterInput(BaseModel):
-    """stats_get_master のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    collection_name: str = Field(
-        ..., description="マスタコレクション名。例: '_M_calendar'、'_M_prefecture'"
-    )
+@mcp.tool()
+async def stats_get_collection(
+    collection_name: Annotated[str, Field(description="GCSに保存されたコレクション名")],
+) -> str:
+    """GCSに保存された統計データを汎用取得する。
 
-@mcp.tool(
-    name="stats_get_master",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def stats_get_master(params: StatsGetMasterInput) -> str:
-    """マスタデータ（カレンダー・都道府県等）を取得する。
-
-    Args:
-        params: collection_name (str) - マスタコレクション名
-
-    Returns:
-        str: JSON形式のマスタデータ
+    専用エンドポイント（d_kanko, jma, enecho など）がある場合はそちらを優先すること。
     """
-    try:
-        data = await _get(f"/master/{params.collection_name}")
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get(f"/stats/{collection_name}")
 
 
-# --- e-Stat ---
+@mcp.tool()
+async def master_get(
+    collection_name: Annotated[str, Field(
+        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku"
+    )],
+    year: Annotated[Optional[str], Field(description="_M_calendarのみ: 年で絞込。例 2026")] = None,
+    month: Annotated[Optional[str], Field(description="_M_calendarのみ: 月で絞込 1-12")] = None,
+    from_date: Annotated[Optional[str], Field(description="_M_calendarのみ: 開始日 YYYY-MM-DD")] = None,
+    to_date: Annotated[Optional[str], Field(description="_M_calendarのみ: 終了日 YYYY-MM-DD")] = None,
+    holiday_only: Annotated[Optional[str], Field(description="_M_calendarのみ: trueで祝日のみ")] = None,
+    weekday: Annotated[Optional[str], Field(description="_M_calendarのみ: 曜日コード 0=月〜6=日")] = None,
+) -> str:
+    """マスタデータを取得する。
 
-class EstatGetMetadataInput(BaseModel):
-    """estat_get_metadata のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    stats_data_id: str = Field(
-        ..., description="e-Stat統計表ID。例: '0003427113'（消費者物価指数）"
-    )
+    利用可能なマスタ:
+    - _M_pref            都道府県マスタ（47件）
+    - _M_city            市区町村マスタ（全国）
+    - _M_calendar        カレンダーマスタ（祝日・平日判定、1950年〜）
+    - _M_country         国名マスタ（財務省貿易統計ベース）
+    - _M_zairyu_shikaku  在留資格マスタ（e-Stat cat01ベース）
 
-@mcp.tool(
-    name="estat_get_metadata",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def estat_get_metadata(params: EstatGetMetadataInput) -> str:
-    """e-Statの統計表メタ情報（分類・地域・時期の選択肢と総件数）を取得する。
-
-    estat_get_data を呼ぶ前に、利用可能なパラメータコードを確認するために使う。
-
-    Args:
-        params: stats_data_id (str) - e-Stat統計表ID
-
-    Returns:
-        str: JSON形式のメタ情報（classifications, total_count等）
+    絞り込みパラメータは _M_calendar のみ有効。全件取得は重いため
+    _M_calendar は year か from_date/to_date での絞込を推奨。
     """
-    try:
-        data = await _get(f"/estat/meta/{params.stats_data_id}")
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get(f"/master/{collection_name}", {
+        "year": year, "month": month, "from": from_date, "to": to_date,
+        "holiday_only": holiday_only, "weekday": weekday,
+    })
 
 
-class EstatGetDataInput(BaseModel):
-    """estat_get_data のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    stats_data_id: str = Field(
-        ..., description="e-Stat統計表ID。例: '0003427113'"
-    )
-    cd_time_from: Optional[str] = Field(
-        None, description="開始時期コード。例: '2024000000'（2024年）、'2024001201'（2024年12月）"
-    )
-    cd_time_to: Optional[str] = Field(
-        None, description="終了時期コード。例: '2024999999'（2024年末）"
-    )
-    cd_area: Optional[str] = Field(
-        None, description="地域コード（カンマ区切り可）。例: '00000'（全国）、'20A01'（長野市）"
-    )
-    cd_cat01: Optional[str] = Field(
-        None, description="分類1コード。例: '0001'（総合）"
-    )
-    extra_params: Optional[str] = Field(
-        None, description="追加パラメータをJSON文字列で指定。例: '{\"cdTab\": \"1\"}'"
-    )
+# =============================================================================
+# e-Stat
+# =============================================================================
 
-@mcp.tool(
-    name="estat_get_data",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def estat_get_data(params: EstatGetDataInput) -> str:
-    """e-Stat統計データをパススルー取得する（保存なし）。
+@mcp.tool()
+async def estat_meta(
+    stats_data_id: Annotated[str, Field(description="e-Stat統計表ID。例: 0003427113")],
+    extra_params: Annotated[Optional[str], Field(
+        description='絞込条件をJSON文字列で指定。例: {"cdArea":"13A01","cdTimeFrom":"2020000000"}'
+    )] = None,
+) -> str:
+    """e-Stat統計表のパラメータ一覧と、絞込条件を反映した件数を返す。
 
-    大量データがある場合は cd_time_from/cd_time_to で年単位に絞ること。
-    利用可能なコードは estat_get_metadata で事前確認すること。
-
-    Args:
-        params:
-            stats_data_id (str): e-Stat統計表ID
-            cd_time_from (str, optional): 開始時期コード
-            cd_time_to (str, optional): 終了時期コード
-            cd_area (str, optional): 地域コード
-            cd_cat01 (str, optional): 分類1コード
-            extra_params (str, optional): 追加パラメータJSON文字列
-
-    Returns:
-        str: JSON形式の統計データ（value配列）
+    estat_pass で実データを取る前に、必ずこれで件数とパラメータを確認すること。
+    レスポンスの total_number（件数）と parameters（指定可能な選択肢）が重要。
     """
-    try:
-        query: dict = {}
-        if params.cd_time_from:
-            query["cdTimeFrom"] = params.cd_time_from
-        if params.cd_time_to:
-            query["cdTimeTo"] = params.cd_time_to
-        if params.cd_area:
-            query["cdArea"] = params.cd_area
-        if params.cd_cat01:
-            query["cdCat01"] = params.cd_cat01
-        if params.extra_params:
-            query.update(json.loads(params.extra_params))
-
-        data = await _get(f"/estat/pass/{params.stats_data_id}", params=query)
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get(f"/estat/meta/{stats_data_id}", _extra(extra_params))
 
 
-# --- 日銀BOJ ---
+@mcp.tool()
+async def estat_pass(
+    stats_data_id: Annotated[str, Field(description="e-Stat統計表ID。例: 0003427113")],
+    cd_area: Annotated[Optional[str], Field(description="地域コード。カンマ区切り可。例: 00000,13A01")] = None,
+    cd_cat01: Annotated[Optional[str], Field(description="分類事項01のコード")] = None,
+    cd_time_from: Annotated[Optional[str], Field(description="時間軸の開始。例: 2024000000")] = None,
+    cd_time_to: Annotated[Optional[str], Field(description="時間軸の終了")] = None,
+    extra_params: Annotated[Optional[str], Field(
+        description='その他のe-Statパラメータ。JSON文字列。例: {"cdCat02":"001"}'
+    )] = None,
+) -> str:
+    """e-Stat統計データを取得し、コードを日本語名称に変換して返す。
 
-class BojGetDataInput(BaseModel):
-    """boj_get_data のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    db: str = Field(
-        ..., description="DB名。例: 'FM08'（外国為替）、'CO'（短観）、'PR01'（企業物価）"
-    )
-    code: str = Field(
-        ..., description="系列コード（カンマ区切り、同一期種のみ）。例: 'FXERM07'（ドル円月次）"
-    )
-    start_date: Optional[str] = Field(
-        None, description="開始期。月次: 'YYYYMM'、四半期: 'YYYYQQ'、暦年: 'YYYY'。例: '202401'"
-    )
-    end_date: Optional[str] = Field(
-        None, description="終了期（start_dateと同形式）。例: '202412'"
-    )
-
-@mcp.tool(
-    name="boj_get_data",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def boj_get_data(params: BojGetDataInput) -> str:
-    """日銀時系列統計データを系列コード指定で取得する（コードAPI）。
-
-    系列コードは boj_get_metadata で確認できる。
-    同一期種（月次・四半期等）のコードのみ混在可能。
-
-    Args:
-        params:
-            db (str): DB名（例: FM08, CO, PR01）
-            code (str): 系列コード（カンマ区切り）
-            start_date (str, optional): 開始期
-            end_date (str, optional): 終了期
-
-    Returns:
-        str: JSON形式の時系列データ
+    大量データは応答が切り詰められる。必ず estat_meta で件数を確認し、
+    地域・期間で絞ってから呼ぶこと。
     """
-    try:
-        query = {"db": params.db, "code": params.code}
-        if params.start_date:
-            query["startDate"] = params.start_date
-        if params.end_date:
-            query["endDate"] = params.end_date
-        data = await _get("/boj/pass", params=query)
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    params = {
+        "cdArea": cd_area, "cdCat01": cd_cat01,
+        "cdTimeFrom": cd_time_from, "cdTimeTo": cd_time_to,
+    }
+    params.update(_extra(extra_params))
+    return await _get(f"/estat/pass/{stats_data_id}", params)
 
 
-class BojGetLayerInput(BaseModel):
-    """boj_get_layer のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    db: str = Field(..., description="DB名。例: 'FF'（資金循環）、'BP01'（国際収支）")
-    frequency: str = Field(
-        ..., description="期種。'M'（月次）、'Q'（四半期）、'CY'（暦年）、'FY'（年度）等"
-    )
-    layer: str = Field(
-        ..., description="階層情報（カンマ区切り）。例: '1,1,1'、'*'（全件）"
-    )
-    start_date: Optional[str] = Field(None, description="開始期（期種に合わせた形式）")
-    end_date: Optional[str] = Field(None, description="終了期")
+# =============================================================================
+# 日銀 BOJ
+# =============================================================================
 
-@mcp.tool(
-    name="boj_get_layer",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def boj_get_layer(params: BojGetLayerInput) -> str:
-    """日銀時系列統計データを階層指定で取得する（階層API）。
+@mcp.tool()
+async def boj_meta(
+    db: Annotated[str, Field(description="DB名。例: FM08（外国為替市況）、CO（短観）")],
+) -> str:
+    """日銀DBの系列コード一覧・系列名・収録期間・階層情報を取得する。
 
-    特定DBの階層ツリー配下のデータを一括取得する。
-    階層構造は boj_get_metadata で確認する。
-    1回のリクエストで最大250系列・6万データ点まで取得可能。
+    boj_pass / boj_layer で使うコードを調べるために先に呼ぶ。
 
-    Args:
-        params:
-            db (str): DB名
-            frequency (str): 期種
-            layer (str): 階層情報
-            start_date (str, optional): 開始期
-            end_date (str, optional): 終了期
-
-    Returns:
-        str: JSON形式の時系列データ（NEXTPOSITION含む）
+    主なDB名:
+      IR01 基準割引率 / IR04 貸出約定平均金利
+      FM01 無担保コールO/N / FM08 外国為替市況 / FM09 実効為替レート
+      MD01 マネタリーベース / MD02 マネーストック / MD11 預金・現金・貸出金
+      LA01 貸出先別貸出金 / PR01 企業物価指数 / PR02 企業向けサービス価格指数
+      CO 短観 / BP01 国際収支 / FF 資金循環 / PF02 政府債務
     """
-    try:
-        query = {
-            "db": params.db,
-            "frequency": params.frequency,
-            "layer": params.layer,
-        }
-        if params.start_date:
-            query["startDate"] = params.start_date
-        if params.end_date:
-            query["endDate"] = params.end_date
-        data = await _get("/boj/layer", params=query)
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get("/boj/meta", {"db": db})
 
 
-class BojGetMetadataInput(BaseModel):
-    """boj_get_metadata のパラメータ"""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    db: str = Field(
-        ..., description="DB名。例: 'FM08'（外国為替市況）、'PR01'（企業物価指数）"
-    )
+@mcp.tool()
+async def boj_pass(
+    db: Annotated[str, Field(description="DB名。例: FM08")],
+    code: Annotated[str, Field(description="系列コード。カンマ区切りで複数可（同一期種のみ）")],
+    start_date: Annotated[Optional[str], Field(description="開始期。YYYYMM形式。例: 202401")] = None,
+    end_date: Annotated[Optional[str], Field(description="終了期。YYYYMM形式")] = None,
+) -> str:
+    """日銀の時系列統計データを系列コード指定で取得する（コードAPI）。
 
-@mcp.tool(
-    name="boj_get_metadata",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
-)
-async def boj_get_metadata(params: BojGetMetadataInput) -> str:
-    """日銀DBのメタ情報（系列コード・系列名・収録期間・階層情報）を取得する。
-
-    boj_get_data や boj_get_layer で使用するコードを調べるために使う。
-
-    Args:
-        params: db (str) - DB名
-
-    Returns:
-        str: JSON形式のメタ情報（系列コード・名称・期種・収録期間等）
+    例: db=FM08, code=FXERD04 → USD/JPY 日次
+        db=FM08, code=FXERM07 → USD/JPY 月次平均
+    系列コードが不明なら先に boj_meta を呼ぶこと。
     """
-    try:
-        data = await _get("/boj/meta", params={"db": params.db})
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _handle_error(e)
+    return await _get("/boj/pass", {
+        "db": db, "code": code, "startDate": start_date, "endDate": end_date,
+    })
+
+
+@mcp.tool()
+async def boj_layer(
+    db: Annotated[str, Field(description="DB名。例: FF（資金循環）、BP01（国際収支）")],
+    layer: Annotated[str, Field(description="階層情報。カンマ区切り。* でワイルドカード。例: 1,1,1")],
+    frequency: Annotated[str, Field(description="期種。CY=暦年 / FY=年度 / Q=四半期 / M=月次 / D=日次")],
+    start_date: Annotated[Optional[str], Field(description="開始期。例: 202504")] = None,
+    end_date: Annotated[Optional[str], Field(description="終了期")] = None,
+) -> str:
+    """日銀の時系列統計データを階層指定で一括取得する（階層API）。
+
+    階層情報は boj_meta のレスポンス LAYER1〜LAYER5 列で確認できる。
+    """
+    return await _get("/boj/layer", {
+        "db": db, "layer": layer, "frequency": frequency,
+        "startDate": start_date, "endDate": end_date,
+    })
+
+
+# =============================================================================
+# FRED（米国経済統計）
+# =============================================================================
+
+@mcp.tool()
+async def fred_search(
+    search_text: Annotated[str, Field(description="検索キーワード。スペース区切りでAND検索")],
+    limit: Annotated[Optional[str], Field(description="取得件数。デフォルト1000、最大1000")] = "20",
+) -> str:
+    """FREDの系列をキーワード検索する。fred_pass で使う series_id を調べる用途。"""
+    return await _get("/fred/search", {"search_text": search_text, "limit": limit})
+
+
+@mcp.tool()
+async def fred_meta(
+    series_id: Annotated[str, Field(description="FRED系列ID。例: DEXJPUS")],
+) -> str:
+    """FRED系列のメタ情報（名称・単位・頻度・収録期間）を取得する。"""
+    return await _get("/fred/meta", {"series_id": series_id})
+
+
+@mcp.tool()
+async def fred_pass(
+    series_id: Annotated[str, Field(description="FRED系列ID")],
+    observation_start: Annotated[Optional[str], Field(description="開始日 YYYY-MM-DD")] = None,
+    observation_end: Annotated[Optional[str], Field(description="終了日 YYYY-MM-DD")] = None,
+    frequency: Annotated[Optional[str], Field(
+        description="集計頻度変換。d=日次 / w=週次 / m=月次 / q=四半期 / a=年次"
+    )] = None,
+) -> str:
+    """FREDの時系列データを取得する。
+
+    よく使う系列ID:
+      DEXJPUS  USD/JPY為替（日次）    FEDFUNDS FF金利（月次）
+      CPIAUCSL 米国CPI季調済（月次）  GDP      米国GDP（四半期）
+      UNRATE   米国失業率（月次）      DGS10    10年債利回り（日次）
+    """
+    return await _get("/fred/pass", {
+        "series_id": series_id,
+        "observation_start": observation_start,
+        "observation_end": observation_end,
+        "frequency": frequency,
+    })
+
+
+# =============================================================================
+# EIA（米国エネルギー）/ NDL（国立国会図書館）
+# =============================================================================
+
+@mcp.tool()
+async def eia_pass(
+    route: Annotated[str, Field(description="EIA APIのエンドポイントパス")],
+    extra_params: Annotated[Optional[str], Field(
+        description='その他パラメータをJSON文字列で。例: {"data[]":"value","facets[series][]":"RWTC","frequency":"monthly"}'
+    )] = None,
+) -> str:
+    """米国エネルギー情報局（EIA）のデータを取得する。
+
+    主なroute:
+      petroleum/pri/spt/data/            WTI・Brent原油スポット価格
+      petroleum/pri/gnd/dcus/nus/data/   米国ガソリン小売価格
+      natural-gas/pri/sum/dcus/nus/data/ 米国天然ガス価格
+    """
+    params = {"route": route}
+    params.update(_extra(extra_params))
+    return await _get("/eia/pass", params)
+
+
+@mcp.tool()
+async def ndl_pass(
+    extra_params: Annotated[str, Field(
+        description='NDL OpenSearchのパラメータをJSON文字列で指定。例: {"any":"統計","cnt":"10"}'
+    )],
+) -> str:
+    """国立国会図書館サーチ（NDL OpenSearch）で書誌情報を検索する。"""
+    return await _get("/ndl/pass", _extra(extra_params))
+
+
+# =============================================================================
+# EDINET（有価証券報告書）
+# =============================================================================
+
+@mcp.tool()
+async def edinet_codes(
+    filer_name: Annotated[Optional[str], Field(description="提出者名で絞込（部分一致）。例: トヨタ")] = None,
+    sec_code: Annotated[Optional[str], Field(description="証券コードで絞込（完全一致）。例: 7203")] = None,
+) -> str:
+    """EDINET登録企業の一覧を取得する。EDINETコードや決算日を調べる用途。
+
+    絞込なしだと数千件返るため、必ず filer_name か sec_code を指定すること。
+    """
+    return await _get("/edinet/codes", {"filer_name": filer_name, "sec_code": sec_code})
+
+
+@mcp.tool()
+async def edinet_documents(
+    date: Annotated[Optional[str], Field(description="単一日付 YYYY-MM-DD。省略時は当日")] = None,
+    date_from: Annotated[Optional[str], Field(description="範囲検索の開始日。最大60日間")] = None,
+    date_to: Annotated[Optional[str], Field(description="範囲検索の終了日")] = None,
+    doc_type: Annotated[Optional[str], Field(
+        description="書類種別コード。120=有価証券報告書 / 140=四半期 / 160=半期 / 180=臨時 / 350=大量保有"
+    )] = None,
+    period_end: Annotated[Optional[str], Field(
+        description="決算日で絞込 YYYY-MM-DD。例: 2025-03-31。date省略時はピンポイント検索（15〜30秒）"
+    )] = None,
+    edinet_code: Annotated[Optional[str], Field(description="EDINETコード。例: E02144")] = None,
+    filer_name: Annotated[Optional[str], Field(description="提出者名（部分一致）")] = None,
+) -> str:
+    """EDINETの提出書類一覧を取得する。docID を得るために使う。
+
+    特定企業の有報を探すなら period_end + edinet_code の組み合わせが最速。
+    date_from を使う範囲検索はレート制限で30日=約30秒かかるため多用しないこと。
+    """
+    return await _get("/edinet/documents", {
+        "date": date, "date_from": date_from, "date_to": date_to,
+        "doc_type": doc_type, "period_end": period_end,
+        "edinet_code": edinet_code, "filer_name": filer_name,
+    })
+
+
+@mcp.tool()
+async def edinet_get(
+    doc_ids: Annotated[str, Field(description="書類管理番号。カンマ区切り、最大20件。例: S100XXXX")],
+    file: Annotated[Optional[str], Field(
+        description="CSVファイル名（部分一致）。省略時はZIP内のファイル一覧を返す。"
+                    "例: jpcrp030000-asr（全財務データ）/ BalanceSheet / StatementOfIncome"
+    )] = None,
+) -> str:
+    """EDINETの書類CSVをJSON形式で取得する。
+
+    docID は edinet_documents から得る。csvFlag=1 の書類のみ対象。
+    file を省略するとファイル一覧が返るので、まず一覧を見てから指定するとよい。
+    """
+    return await _get("/edinet/get", {"doc_ids": doc_ids, "file": file})
+
+
+# =============================================================================
+# 国内データ（観光・労働・エネルギー・気象・株価）
+# =============================================================================
+
+@mcp.tool()
+async def kabuka_get(
+    ticker: Annotated[Optional[str], Field(description="ティッカー（yfinance形式）。省略時 ^N225")] = None,
+    from_date: Annotated[Optional[str], Field(description="開始日 YYYY-MM-DD")] = None,
+    to_date: Annotated[Optional[str], Field(description="終了日 YYYY-MM-DD")] = None,
+    interval: Annotated[Optional[str], Field(description="足種。1d=日次 / 1wk=週次 / 1mo=月次")] = None,
+) -> str:
+    """株価・指数データを取得する（Yahoo Finance）。
+
+    期間を省略すると全期間となり応答が巨大になるため、from_date の指定を推奨。
+    """
+    return await _get("/kabuka", {
+        "ticker": ticker, "from": from_date, "to": to_date, "interval": interval,
+    })
+
+
+@mcp.tool()
+async def d_kanko_get(
+    type: Annotated[Optional[str], Field(description="pref=都道府県のみ / city=市区町村のみ / 省略=両方")] = None,
+    from_date: Annotated[Optional[str], Field(description="開始年月 YYYY-MM")] = None,
+    to_date: Annotated[Optional[str], Field(description="終了年月 YYYY-MM")] = None,
+    pref: Annotated[Optional[str], Field(description="都道府県名（部分一致）。例: 長野")] = None,
+    city: Annotated[Optional[str], Field(description="市区町村名（部分一致）。type=cityのときのみ有効")] = None,
+) -> str:
+    """観光庁「デジタル観光統計オープンデータ」の来訪者数を取得する。
+
+    単位は千人。パラメータ省略で全件返るため、期間か地域で絞ること。
+    """
+    return await _get("/d_kanko", {
+        "type": type, "from": from_date, "to": to_date, "pref": pref, "city": city,
+    })
+
+
+@mcp.tool()
+async def n_roudou_get() -> str:
+    """長野労働局の受理地別・産業別 新規求人数（月次）を取得する。
+
+    産業コード: all=合計 / D=建設 / E=製造 / G=情報通信 / H=運輸 / I=卸売小売
+    J=金融保険 / K=不動産 / M=宿泊飲食 / N=生活関連 / O=教育 / P=医療福祉
+    R=サービス / other=その他
+    """
+    return await _get("/n_roudou/juri_sangyo")
+
+
+@mcp.tool()
+async def enecho_gasoline(
+    item: Annotated[Optional[str], Field(
+        description="品目。ハイオク / レギュラー / 軽油 / 灯油店頭 / 灯油配達"
+    )] = None,
+    region: Annotated[Optional[str], Field(description="地域。全国 または都道府県名。例: 長野")] = None,
+    from_date: Annotated[Optional[str], Field(description="開始日 YYYY-MM-DD")] = None,
+    to_date: Annotated[Optional[str], Field(description="終了日 YYYY-MM-DD")] = None,
+) -> str:
+    """資源エネルギー庁の給油所小売価格調査（週次）を取得する。
+
+    収録期間は1990年8月〜と長いため、item と region での絞込を推奨。
+    価格の単位は円/L（灯油店頭・配達は円/18L）。
+    """
+    return await _get("/enecho/gasoline", {
+        "item": item, "region": region, "from": from_date, "to": to_date,
+    })
+
+
+@mcp.tool()
+async def jma_nagano(
+    location: Annotated[Optional[str], Field(
+        description="地点名。カンマ区切りで複数可。長野 / 松本 / 諏訪 / 飯田 / 軽井沢。省略時は全5地点"
+    )] = None,
+    from_date: Annotated[Optional[str], Field(description="開始日 YYYY-MM-DD")] = None,
+    to_date: Annotated[Optional[str], Field(description="終了日 YYYY-MM-DD")] = None,
+) -> str:
+    """長野県5地点の週間天気予報を取得する（毎朝6:00 JST更新、過去分も蓄積）。
+
+    注意: 明後日以降の気温は長野地点のみ値が入り、他4地点はnullになる。
+    天気・降水確率も先の日付ほど県全体で1種類の値になる。
+    """
+    return await _get("/jma/nagano", {
+        "location": location, "from": from_date, "to": to_date,
+    })

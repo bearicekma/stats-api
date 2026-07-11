@@ -22,3 +22,4 @@ yt-dlp
 youtube-transcript-api
 google-auth-oauthlib
 google-api-python-client
+mcp

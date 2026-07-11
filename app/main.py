@@ -14,8 +14,17 @@ from app.collector     import (
     run_jma_collection,
 )
 from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename
+from app.mcp_server import mcp
+import contextlib
 
-app = FastAPI(title="Stats API", default_response_class=ORJSONResponse)
+# MCPのセッションマネージャをアプリのライフサイクルに接続する（Streamable HTTPで必須）
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(title="Stats API", default_response_class=ORJSONResponse, lifespan=lifespan)
 
 # レスポンスをgzip圧縮する（1KB未満は対象外）
 # compresslevel=3: 大量データのストリーミング時、圧縮CPUが送信律速になるのを避ける
@@ -116,3 +125,7 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
 
     background_tasks.add_task(func)
     return {"message": f"{target} の収集を開始しました", "timestamp": str(datetime.now())}
+
+
+# MCPサーバーのルートを登録する（エンドポイント: /mcp）
+app.router.routes.extend(mcp.streamable_http_app().routes)
