@@ -92,6 +92,11 @@ async def get_master(collection_name: str, request: Request):
     - `sub_type` (string) 号・区分（例: 1号イ）。区分なしはnull
     - `category_major` (string) 大分類（就労系／身分・地位系／非就労系／特定活動／特別永住者）
     - `sort_order` (int) 表示順（五十音順）
+    - `betsuhyo_kubun` (string) 入管法上の区分（一の表／二の表／三の表／四の表／五の表／別表第二／特例法）
+    - `landing_criteria` (bool) 上陸許可基準の適用有無
+    - `katsudo_summary` (string) 活動内容を平易な言葉で要約した説明
+    - `example` (string) 該当例（代表的な職業・立場）
+    - `zairyu_kikan` (string) 在留期間の目安
 
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
