@@ -42,6 +42,7 @@ async def get_master(collection_name: str, request: Request):
     - `_M_calendar` カレンダーマスタ（祝日・平日判定、1950年〜）
     - `_M_country` 国名マスタ（財務省貿易統計 統計国名符号表ベース）
     - `_M_zairyu_shikaku` 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
+    - `_M_age` 年齢マスタ（各歳・5歳階級・10歳階級・3区分・4区分・労働力調査型・学齢区分）
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
@@ -98,6 +99,16 @@ async def get_master(collection_name: str, request: Request):
     - `example` (string) 該当例（代表的な職業・立場）
     - `zairyu_kikan` (string) 在留期間の目安
 
+    **_M_age のレスポンスフィールド:**
+    - `age` (int) 年齢（0〜100、100は「100歳以上」）
+    - `age_name` (string) 年齢表示（例: "0歳"、"100歳以上"）
+    - `age5_code` / `age5_name` 5歳階級（例: "0～4歳"）
+    - `age10_code` / `age10_name` 10歳階級（例: "0～9歳"）
+    - `age3_code` / `age3_name` 年齢3区分（年少人口／生産年齢人口／老年人口）
+    - `age4_code` / `age4_name` 年齢4区分（年少人口／生産年齢人口／前期高齢者／後期高齢者）
+    - `age_labor_code` / `age_labor_name` 労働力調査型区分（15歳未満〜65歳以上の7区分）
+    - `age_school_code` / `age_school_name` 学齢区分（未就学〜18歳以上の5区分）
+
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
@@ -107,6 +118,7 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_calendar?weekday=0&year=2026` 2026年の月曜日一覧
     - `/master/_M_country` 国名マスタ一覧
     - `/master/_M_zairyu_shikaku` 在留資格マスタ一覧
+    - `/master/_M_age` 年齢マスタ一覧
     """
     tmp_path = None
     try:
@@ -143,6 +155,7 @@ async def get_master(collection_name: str, request: Request):
             "_M_pref":     "code",
             "_M_country":  "code",
             "_M_zairyu_shikaku": "sort_order",
+            "_M_age": "age",
         }
         order_col = order_map.get(collection_name)
         order_by  = f"ORDER BY {order_col}" if order_col else ""
