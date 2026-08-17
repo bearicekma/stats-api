@@ -13,7 +13,7 @@ from app.collector     import (
     run_enecho_collection,
     run_jma_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename, ipss
 from app.mcp_server import mcp
 import contextlib
 
@@ -47,6 +47,7 @@ app.include_router(kabuka.router)
 app.include_router(ocr.router)
 app.include_router(transcribe.router)
 app.include_router(drive_rename.router)
+app.include_router(ipss.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
