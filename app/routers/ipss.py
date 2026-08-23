@@ -49,16 +49,44 @@ async def get_versions():
 
 @router.get("/shorai_jinko", summary="将来推計人口（市区町村別）")
 async def get_shorai_jinko(
-    estimate_ver: str = Query(None, description="推計版。未指定なら最新版"),
-    pref_code: str = Query(None, description="都道府県コード2桁"),
-    area_code: str = Query(None, description="地域コード5桁"),
-    area_level: str = Query(None, description="pref / city / special_ward / other"),
-    year: int = Query(None, description="2020〜2050の5年刻み"),
-    sex: str = Query(None, description="総数 / 男 / 女"),
-    age5_code: str = Query(None, description="00〜18、95歳以上は 19+"),
-    limit: int = Query(None, ge=1),
-    format: str = Query("json", description="json または csv"),
+    estimate_ver: str = Query(None, description="推計版。未指定なら最新版を返す。例: 2023"),
+    pref_code: str = Query(None, description="都道府県コード2桁。例: 20（長野県）"),
+    area_code: str = Query(None, description="地域コード5桁。例: 20201（長野市）、20000（長野県計）、00000（全国計）"),
+    area_level: str = Query(None, description="country=全国計 / pref=都道府県計 / city=市町村 / special_ward=東京23区 / other=福島県浜通り地域"),
+    year: int = Query(None, description="2020, 2025, 2030, 2035, 2040, 2045, 2050 の5年刻み"),
+    sex: str = Query(None, description="総数 / 男 / 女（日本語で指定）"),
+    age5_code: str = Query(None, description="5歳階級コード。00=0〜4歳、01=5〜9歳 … 18=90〜94歳、19+=95歳以上"),
+    limit: int = Query(None, ge=1, description="取得件数の上限。省略時は全件"),
+    format: str = Query("json", description="json（既定）または csv"),
 ):
+    """
+    国立社会保障・人口問題研究所「日本の地域別将来推計人口」の市区町村別データ。
+
+    **全件数が多いため、無指定で叩くと応答が巨大になります。必ず絞り込んでください。**
+
+    ### 使用例
+    - 長野県内の全市町村・2050年の推計
+      `?pref_code=20&year=2050`
+    - 都道府県別の総人口推移（47件×7年次）
+      `?area_level=pref&sex=総数`
+    - 全国の年次別・年齢階級別人口
+      `?area_code=00000&sex=総数`
+    - CSV形式で取得（Power Query向け・BOM付きUTF-8）
+      `?pref_code=20&format=csv`
+
+    ### 収録内容
+    - 推計版: 令和5(2023)年推計、2020年国勢調査ベース
+    - 年次: 2020〜2050年の5年刻み（2020年は実績値）
+    - 地域: 全国計1 / 都道府県計47 / 市町村1,700 / 東京23区 / 福島県浜通り地域1
+    - 年齢: 5歳階級20区分。政令市の行政区と再掲行は除外済み
+
+    ### 注意
+    - `sex` の「総数」は男＋女と一致します
+    - `age5_code` の `19+` は95歳以上の開放階級です。マスタ `_M_age` の `19`(95〜99歳) と `20`(100歳以上) の合算に相当し、直接JOINできません
+    - 福島県の浜通り地域13市町村は個別の推計がなく、`07999` に一括計上されています
+    - 全国計は47都道府県の合算値です
+    - 利用可能な推計版は `/ipss/versions` で確認できます
+    """
     tmp_path = None
     try:
         vers = _list_versions()
