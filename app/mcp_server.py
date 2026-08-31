@@ -4,7 +4,7 @@
 
 import json
 import os
-from typing import Annotated, Optional
+from typing import Annotated, Dict, Optional
 
 import httpx
 from pydantic import Field
@@ -55,9 +55,13 @@ async def _get(path: str, params: dict | None = None) -> str:
     return text
 
 
-def _extra(extra_params: Optional[str]) -> dict:
-    """JSON文字列で渡された追加パラメータをdictに変換する"""
-    return json.loads(extra_params) if extra_params else {}
+def _extra(extra_params) -> dict:
+    """追加パラメータをdictに変換する（dict / JSON文字列 / None のいずれも受け付ける）"""
+    if not extra_params:
+        return {}
+    if isinstance(extra_params, dict):
+        return extra_params
+    return json.loads(extra_params)
 
 
 # =============================================================================
@@ -126,8 +130,8 @@ async def master_get(
 @mcp.tool()
 async def estat_meta(
     stats_data_id: Annotated[str, Field(description="e-Stat統計表ID。例: 0003427113")],
-    extra_params: Annotated[Optional[str], Field(
-        description='絞込条件をJSON文字列で指定。例: {"cdArea":"13A01","cdTimeFrom":"2020000000"}'
+    extra_params: Annotated[Optional[Dict[str, str]], Field(
+        description='絞込条件をオブジェクトで指定。例: {"cdArea":"13A01","cdTimeFrom":"2020000000"}'
     )] = None,
 ) -> str:
     """e-Stat統計表のパラメータ一覧と、絞込条件を反映した件数を返す。
@@ -143,10 +147,14 @@ async def estat_pass(
     stats_data_id: Annotated[str, Field(description="e-Stat統計表ID。例: 0003427113")],
     cd_area: Annotated[Optional[str], Field(description="地域コード。カンマ区切り可。例: 00000,13A01")] = None,
     cd_cat01: Annotated[Optional[str], Field(description="分類事項01のコード")] = None,
+    cd_cat02: Annotated[Optional[str], Field(description="分類事項02のコード")] = None,
+    cd_cat03: Annotated[Optional[str], Field(description="分類事項03のコード")] = None,
+    cd_cat04: Annotated[Optional[str], Field(description="分類事項04のコード")] = None,
+    cd_time: Annotated[Optional[str], Field(description="時間軸コード。カンマ区切り可。例: 2023000000")] = None,
     cd_time_from: Annotated[Optional[str], Field(description="時間軸の開始。例: 2024000000")] = None,
     cd_time_to: Annotated[Optional[str], Field(description="時間軸の終了")] = None,
-    extra_params: Annotated[Optional[str], Field(
-        description='その他のe-Statパラメータ。JSON文字列。例: {"cdCat02":"001"}'
+    extra_params: Annotated[Optional[Dict[str, str]], Field(
+        description='上記以外のe-Statパラメータをオブジェクトで指定。例: {"cdCat05":"001"}'
     )] = None,
 ) -> str:
     """e-Stat統計データを取得し、コードを日本語名称に変換して返す。
@@ -154,8 +162,13 @@ async def estat_pass(
     大量データは応答が切り詰められる。必ず estat_meta で件数を確認し、
     地域・期間で絞ってから呼ぶこと。
     """
+    # /estat/pass の既定出力はCSVのため、MCPでは明示的にJSONを要求する
     params = {
-        "cdArea": cd_area, "cdCat01": cd_cat01,
+        "format": "json",
+        "cdArea": cd_area,
+        "cdCat01": cd_cat01, "cdCat02": cd_cat02,
+        "cdCat03": cd_cat03, "cdCat04": cd_cat04,
+        "cdTime": cd_time,
         "cdTimeFrom": cd_time_from, "cdTimeTo": cd_time_to,
     }
     params.update(_extra(extra_params))
