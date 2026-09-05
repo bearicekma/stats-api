@@ -2,7 +2,7 @@
 # /estat/meta/{stats_data_id} : メタ情報・フィルタ後件数・推定ページ数
 # /estat/pass/{stats_data_id} : パススルー（並列先読み＋メモリ一定のストリーミング、JSON/CSV対応）
 
-from fastapi           import APIRouter, Request
+from fastapi           import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from datetime          import datetime
 from collections       import deque
@@ -33,6 +33,22 @@ RESERVED_PARAMS = {
 
 
 # ── ユーティリティ関数 ──────────────────────────────────────
+
+def raise_upstream(exc: httpx.HTTPStatusError):
+    # e-Stat側のHTTPエラーを、原因が判別できるステータスに変換して送出する
+    # 例外メッセージにリクエストURLを含めない（appIdがログに残るのを防ぐ）
+    status = exc.response.status_code
+    if status == 429:
+        raise HTTPException(status_code=429, detail={
+            "error":           "e-Stat APIのレート制限に達しました。時間を置いて再試行してください。",
+            "upstream_status": 429,
+            "retry_after":     exc.response.headers.get("retry-after"),
+        })
+    raise HTTPException(status_code=502, detail={
+        "error":           "e-Stat APIがエラーを返しました。",
+        "upstream_status": status,
+    })
+
 
 def build_code_to_name_map(class_info: list) -> dict:
     # class_infoからコード→名称の変換辞書を作成する
@@ -156,7 +172,10 @@ async def estat_meta(stats_data_id: str, request: Request):
             params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J"},
             timeout=30
         )
-        meta_response.raise_for_status()
+        try:
+            meta_response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise_upstream(e)
 
         # フィルタ後件数を確認するため1件だけ取得する
         # クエリパラメータを転送し、limit/startPositionは最小値で強制上書きする
@@ -170,7 +189,10 @@ async def estat_meta(stats_data_id: str, request: Request):
             params=count_params,
             timeout=30
         )
-        count_response.raise_for_status()
+        try:
+            count_response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise_upstream(e)
 
     # CLASS_OBJがdictの場合（分類が1つのみ）はリストに統一する
     class_info = meta_response.json()["GET_META_INFO"]["METADATA_INF"]["CLASS_INF"]["CLASS_OBJ"]
@@ -272,7 +294,10 @@ async def estat_pass(stats_data_id: str, request: Request):
         lead_params["startPosition"] = 1
 
         lead_resp = await client.get(ESTAT_GET_STATS_DATA, params=lead_params)
-        lead_resp.raise_for_status()
+        try:
+            lead_resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise_upstream(e)
         statistical_data = lead_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
         total_number     = int(statistical_data["RESULT_INF"]["TOTAL_NUMBER"])
 
@@ -286,6 +311,10 @@ async def estat_pass(stats_data_id: str, request: Request):
     # 例: total=250000, LIMIT=100000 → startPosition = [1, 100001, 200001]
     start_positions = list(range(1, total_number + 1, ESTAT_LIMIT))
     fetched_at      = str(datetime.now())
+
+    # ストリーム開始後はHTTPステータスを変更できないため、
+    # 上流エラーはここに記録し、本文の末尾で通知する
+    upstream_error = {}
 
     # ── ページを並列先読みしながら順に取り出すジェネレータ ─
     # JSON/CSV両モードで共有する。送信済みページは都度メモリ解放される
@@ -309,6 +338,10 @@ async def estat_pass(stats_data_id: str, request: Request):
                     next_idx += 1
 
                 yield values
+        except httpx.HTTPStatusError as e:
+            # 途中で上流エラーが出た場合は打ち切り、末尾で通知する
+            upstream_error["status"]      = e.response.status_code
+            upstream_error["retry_after"] = e.response.headers.get("retry-after")
         finally:
             # クライアント切断時など、先読み中タスクをキャンセルしリークを防ぐ
             for task in in_flight:
@@ -342,8 +375,13 @@ async def estat_pass(stats_data_id: str, request: Request):
                         await asyncio.sleep(0)
                 del values
 
-        # フッターに実際の送信件数を付加して閉じる
-        yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
+        # フッターに実際の送信件数を付加して閉じる（中断時はerrorを添える）
+        if upstream_error:
+            yield ('],"count":' + str(total_sent)
+                   + ',"error":"e-Stat upstream ' + str(upstream_error["status"])
+                   + ' / データは不完全です"}').encode("utf-8")
+        else:
+            yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
 
     # ── CSVストリーム ────────────────────────────────────
     async def stream_csv():
@@ -374,6 +412,11 @@ async def estat_pass(stats_data_id: str, request: Request):
                 yield buf.getvalue().encode("utf-8")
                 buf.seek(0); buf.truncate(0)
                 del values
+
+        # 中断時は末尾にエラー行を出し、不完全なCSVと分かるようにする
+        if upstream_error:
+            yield ('#ERROR,e-Stat upstream ' + str(upstream_error["status"])
+                   + ',データは不完全です\n').encode("utf-8")
 
     # ── 出力形式に応じて返す（既定はCSV） ────────────────
     if output_format == "csv":
