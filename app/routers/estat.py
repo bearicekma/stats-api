@@ -18,8 +18,9 @@ router = APIRouter(prefix="/estat", tags=["estat"])
 # 1リクエストあたりのe-Stat取得上限件数
 ESTAT_LIMIT = 100000
 
-# e-Stat APIへの同時リクエスト数 兼 先読みウィンドウ幅（過負荷・メモリ抑制のため5）
-ESTAT_CONCURRENCY = 5
+# e-Stat APIへの同時リクエスト数 兼 先読みウィンドウ幅
+# 5では429（レート制限）を踏んだため3に引き下げ。メモリ抑制にも効く
+ESTAT_CONCURRENCY = 3
 
 # e-Stat データ取得APIのエンドポイント
 ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
