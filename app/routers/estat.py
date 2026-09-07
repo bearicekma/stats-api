@@ -25,7 +25,7 @@ ESTAT_CONCURRENCY = 3
 # 429（レート制限）時のリトライ設定
 # e-Statの制限は数分で解除されるが、長く待つとクライアント側がタイムアウトするため
 # 「一瞬だけ踏んだ」ケースを吸収する短いバックオフに留める
-ESTAT_RETRY_WAITS = [1, 2, 4]   # 秒。最大3回再試行（合計約7秒）
+ESTAT_RETRY_WAITS = []   # リトライ無効。レート制限中に再試行するとリクエストが増幅し429が悪化するため
 
 # e-Stat データ取得APIのエンドポイント
 ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
