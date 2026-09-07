@@ -22,6 +22,11 @@ ESTAT_LIMIT = 100000
 # 5では429（レート制限）を踏んだため3に引き下げ。メモリ抑制にも効く
 ESTAT_CONCURRENCY = 3
 
+# 429（レート制限）時のリトライ設定
+# e-Statの制限は数分で解除されるが、長く待つとクライアント側がタイムアウトするため
+# 「一瞬だけ踏んだ」ケースを吸収する短いバックオフに留める
+ESTAT_RETRY_WAITS = [1, 2, 4]   # 秒。最大3回再試行（合計約7秒）
+
 # e-Stat データ取得APIのエンドポイント
 ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 
@@ -34,6 +39,24 @@ RESERVED_PARAMS = {
 
 
 # ── ユーティリティ関数 ──────────────────────────────────────
+
+async def get_with_retry(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
+    # e-Statへのリクエストを行い、429の場合のみ短いバックオフで再試行する
+    # Retry-Afterが返っていればそれを優先する（ただし上限10秒で打ち切る）
+    for wait in ESTAT_RETRY_WAITS:
+        resp = await client.get(url, params=params)
+        if resp.status_code != 429:
+            return resp
+        retry_after = resp.headers.get("retry-after")
+        try:
+            wait = min(float(retry_after), 10.0) if retry_after else wait
+        except ValueError:
+            pass
+        await asyncio.sleep(wait)
+
+    # 最終試行（ここで429ならレスポンスをそのまま返し呼び出し側で処理させる）
+    return await client.get(url, params=params)
+
 
 def raise_upstream(exc: httpx.HTTPStatusError):
     # e-Stat側のHTTPエラーを、原因が判別できるステータスに変換して送出する
@@ -119,7 +142,7 @@ async def fetch_data_page(client: httpx.AsyncClient, base_params: dict, start_po
     page_params["explanationGetFlg"] = "N"   # 解説情報を省略
     page_params["annotationGetFlg"]  = "N"   # 注釈情報を省略
 
-    resp = await client.get(ESTAT_GET_STATS_DATA, params=page_params)
+    resp = await get_with_retry(client, ESTAT_GET_STATS_DATA, page_params)
     resp.raise_for_status()
     values = resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
 
@@ -165,13 +188,13 @@ async def estat_meta(stats_data_id: str, request: Request):
     # フィルタ条件（クエリパラメータ）を取り出す
     applied_filters = dict(request.query_params)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
 
         # パラメータ一覧を取得する（絞り込みと無関係なため全件のまま）
-        meta_response = await client.get(
+        meta_response = await get_with_retry(
+            client,
             "https://api.e-stat.go.jp/rest/3.0/app/json/getMetaInfo",
-            params={"appId": app_id, "statsDataId": stats_data_id, "lang": "J"},
-            timeout=30
+            {"appId": app_id, "statsDataId": stats_data_id, "lang": "J"},
         )
         try:
             meta_response.raise_for_status()
@@ -185,10 +208,10 @@ async def estat_meta(stats_data_id: str, request: Request):
         count_params["limit"]         = 1
         count_params["startPosition"] = 1
 
-        count_response = await client.get(
+        count_response = await get_with_retry(
+            client,
             "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData",
-            params=count_params,
-            timeout=30
+            count_params,
         )
         try:
             count_response.raise_for_status()
@@ -294,7 +317,7 @@ async def estat_pass(stats_data_id: str, request: Request):
         lead_params["limit"]         = 1
         lead_params["startPosition"] = 1
 
-        lead_resp = await client.get(ESTAT_GET_STATS_DATA, params=lead_params)
+        lead_resp = await get_with_retry(client, ESTAT_GET_STATS_DATA, lead_params)
         try:
             lead_resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -319,9 +342,12 @@ async def estat_pass(stats_data_id: str, request: Request):
 
     # ── ページを並列先読みしながら順に取り出すジェネレータ ─
     # JSON/CSV両モードで共有する。送信済みページは都度メモリ解放される
-    async def iter_pages(client: httpx.AsyncClient):
+    async def iter_pages(client: httpx.AsyncClient, first_values: list):
         in_flight = deque()   # 先読み中タスクのキュー（最大ESTAT_CONCURRENCY）
-        next_idx  = 0
+        next_idx  = 1         # 1ページ目は取得済みのため2ページ目から先読みする
+
+        # 取得済みの1ページ目を先に送出する
+        yield first_values
 
         # 先読みウィンドウを初期充填する
         while next_idx < len(start_positions) and len(in_flight) < ESTAT_CONCURRENCY:
@@ -349,8 +375,8 @@ async def estat_pass(stats_data_id: str, request: Request):
                 task.cancel()
 
     # ── JSONストリーム ───────────────────────────────────
-    async def stream_json():
-        # ヘッダー部分を送出する
+    async def stream_json(first_values, client):
+        # ヘッダー部分を送出する（1ページ目の取得成功後に呼ばれる）
         yield (
             '{"stats_data_id":"' + stats_data_id + '",'
             '"fetched_at":"'     + fetched_at    + '",'
@@ -361,8 +387,8 @@ async def estat_pass(stats_data_id: str, request: Request):
         total_sent = 0
         first_row  = True
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            async for values in iter_pages(client):
+        async with client:
+            async for values in iter_pages(client, first_values):
                 # このページを変換しながら逐次送出する
                 for i, row in enumerate(values):
                     prefix    = b"" if first_row else b","
@@ -379,13 +405,15 @@ async def estat_pass(stats_data_id: str, request: Request):
         # フッターに実際の送信件数を付加して閉じる（中断時はerrorを添える）
         if upstream_error:
             yield ('],"count":' + str(total_sent)
+                   + ',"status":"incomplete"'
                    + ',"error":"e-Stat upstream ' + str(upstream_error["status"])
-                   + ' / データは不完全です"}').encode("utf-8")
+                   + ' / データは不完全です。数分後に再実行してください"}').encode("utf-8")
         else:
-            yield ('],"count":' + str(total_sent) + '}').encode("utf-8")
+            yield ('],"count":' + str(total_sent)
+                   + ',"status":"ok"}').encode("utf-8")
 
     # ── CSVストリーム ────────────────────────────────────
-    async def stream_csv():
+    async def stream_csv(first_values, client):
         # 固定列を決め、BOM付きヘッダー行を送出する
         columns = build_csv_columns(code_map)
         buf     = io.StringIO()
@@ -396,8 +424,8 @@ async def estat_pass(stats_data_id: str, request: Request):
         yield ("\ufeff" + buf.getvalue()).encode("utf-8")
         buf.seek(0); buf.truncate(0)
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            async for values in iter_pages(client):
+        async with client:
+            async for values in iter_pages(client, first_values):
                 for i, row in enumerate(values):
                     # 名称変換した辞書を固定列順に並べる（無い列は空欄）
                     d = convert_row(row, code_map)
@@ -419,7 +447,22 @@ async def estat_pass(stats_data_id: str, request: Request):
             yield ('#ERROR,e-Stat upstream ' + str(upstream_error["status"])
                    + ',データは不完全です\n').encode("utf-8")
 
+    # ── 1ページ目をここで取得する ────────────────────────
+    # ストリーム開始後はHTTPステータスを変更できないため、
+    # 最初のページだけは送出前に取得し、失敗時は429/502として返せるようにする
+    stream_client = httpx.AsyncClient(timeout=300)
+    try:
+        first_values = await fetch_data_page(stream_client, base_params, start_positions[0])
+    except httpx.HTTPStatusError as e:
+        await stream_client.aclose()
+        raise_upstream(e)
+    except Exception:
+        await stream_client.aclose()
+        raise
+
     # ── 出力形式に応じて返す（既定はCSV） ────────────────
     if output_format == "csv":
-        return StreamingResponse(stream_csv(), media_type="text/csv; charset=utf-8")
-    return StreamingResponse(stream_json(), media_type="application/json")
+        return StreamingResponse(stream_csv(first_values, stream_client),
+                                 media_type="text/csv; charset=utf-8")
+    return StreamingResponse(stream_json(first_values, stream_client),
+                             media_type="application/json")
