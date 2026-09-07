@@ -310,26 +310,41 @@ async def estat_pass(stats_data_id: str, request: Request):
     }
     base_params.update(user_params)
 
-    # ── 先行コール ───────────────────────────────────────
-    # limit=1 で total_number と class_info（変換辞書の元）を軽量取得する
-    async with httpx.AsyncClient(timeout=60) as client:
-        lead_params = dict(base_params)
-        lead_params["limit"]         = 1
-        lead_params["startPosition"] = 1
+    # ── 1ページ目を取得する（先行コール廃止） ─────────────
+    # 1回のレスポンスに TOTAL_NUMBER・CLASS_INF・1ページ目のデータが全て含まれるため、
+    # 件数確認だけのための先行コールは不要。e-Statへのリクエスト数が半減する
+    # ストリーム送出前に取得するため、失敗時は429/502として正しく返せる
+    first_params = dict(base_params)
+    first_params["startPosition"]     = 1
+    first_params["metaGetFlg"]        = "Y"   # 変換辞書の元となるCLASS_INFが必要
+    first_params["explanationGetFlg"] = "N"   # 解説情報を省略
+    first_params["annotationGetFlg"]  = "N"   # 注釈情報を省略
 
-        lead_resp = await get_with_retry(client, ESTAT_GET_STATS_DATA, lead_params)
-        try:
-            lead_resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise_upstream(e)
-        statistical_data = lead_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
-        total_number     = int(statistical_data["RESULT_INF"]["TOTAL_NUMBER"])
+    stream_client = httpx.AsyncClient(timeout=300)
+    try:
+        first_resp = await stream_client.get(ESTAT_GET_STATS_DATA, params=first_params)
+        first_resp.raise_for_status()
+        statistical_data = first_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
+    except httpx.HTTPStatusError as e:
+        await stream_client.aclose()
+        raise_upstream(e)
+    except Exception:
+        await stream_client.aclose()
+        raise
 
-        # コード→名称の変換辞書を構築する
-        class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
-        if isinstance(class_info, dict):
-            class_info = [class_info]
-        code_map = build_code_to_name_map(class_info)
+    total_number = int(statistical_data["RESULT_INF"]["TOTAL_NUMBER"])
+
+    # コード→名称の変換辞書を構築する
+    class_info = statistical_data["CLASS_INF"]["CLASS_OBJ"]
+    if isinstance(class_info, dict):
+        class_info = [class_info]
+    code_map = build_code_to_name_map(class_info)
+
+    # 1ページ目のデータ行を取り出す
+    # 0件のときDATA_INFごと無い場合があり、1件のときはdictで返るためリストに統一する
+    first_values = statistical_data.get("DATA_INF", {}).get("VALUE", [])
+    if isinstance(first_values, dict):
+        first_values = [first_values]
 
     # ── ページ境界を計算する ─────────────────────────────
     # 例: total=250000, LIMIT=100000 → startPosition = [1, 100001, 200001]
@@ -446,19 +461,6 @@ async def estat_pass(stats_data_id: str, request: Request):
         if upstream_error:
             yield ('#ERROR,e-Stat upstream ' + str(upstream_error["status"])
                    + ',データは不完全です\n').encode("utf-8")
-
-    # ── 1ページ目をここで取得する ────────────────────────
-    # ストリーム開始後はHTTPステータスを変更できないため、
-    # 最初のページだけは送出前に取得し、失敗時は429/502として返せるようにする
-    stream_client = httpx.AsyncClient(timeout=300)
-    try:
-        first_values = await fetch_data_page(stream_client, base_params, start_positions[0])
-    except httpx.HTTPStatusError as e:
-        await stream_client.aclose()
-        raise_upstream(e)
-    except Exception:
-        await stream_client.aclose()
-        raise
 
     # ── 出力形式に応じて返す（既定はCSV） ────────────────
     if output_format == "csv":
