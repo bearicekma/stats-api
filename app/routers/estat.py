@@ -402,7 +402,8 @@ async def estat_pass(stats_data_id: str, request: Request):
         total_sent = 0
         first_row  = True
 
-        async with client:
+        # clientは1ページ目取得で使用開始済みのためasync withで開き直せない
+        try:
             async for values in iter_pages(client, first_values):
                 # このページを変換しながら逐次送出する
                 for i, row in enumerate(values):
@@ -416,6 +417,9 @@ async def estat_pass(stats_data_id: str, request: Request):
                     if (i & 0x1FFF) == 0:
                         await asyncio.sleep(0)
                 del values
+        finally:
+            # 明示的にクライアントを閉じ、接続リークを防ぐ
+            await client.aclose()
 
         # フッターに実際の送信件数を付加して閉じる（中断時はerrorを添える）
         if upstream_error:
@@ -439,7 +443,8 @@ async def estat_pass(stats_data_id: str, request: Request):
         yield ("\ufeff" + buf.getvalue()).encode("utf-8")
         buf.seek(0); buf.truncate(0)
 
-        async with client:
+        # clientは1ページ目取得で使用開始済みのためasync withで開き直せない
+        try:
             async for values in iter_pages(client, first_values):
                 for i, row in enumerate(values):
                     # 名称変換した辞書を固定列順に並べる（無い列は空欄）
@@ -456,6 +461,9 @@ async def estat_pass(stats_data_id: str, request: Request):
                 yield buf.getvalue().encode("utf-8")
                 buf.seek(0); buf.truncate(0)
                 del values
+        finally:
+            # 明示的にクライアントを閉じ、接続リークを防ぐ
+            await client.aclose()
 
         # 中断時は末尾にエラー行を出し、不完全なCSVと分かるようにする
         if upstream_error:
