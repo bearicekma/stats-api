@@ -34,7 +34,7 @@ ESTAT_GET_STATS_DATA = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
 # （ページング制御は内部で行うため。limit等をユーザーに上書きされるとページ割りが壊れる）
 RESERVED_PARAMS = {
     "limit", "startposition", "metagetflg",
-    "explanationgetflg", "annotationgetflg", "format",
+    "explanationgetflg", "annotationgetflg", "format", "with_code",
 }
 
 
@@ -94,8 +94,9 @@ def build_code_to_name_map(class_info: list) -> dict:
     return code_map
 
 
-def convert_row(row: dict, code_map: dict) -> dict:
+def convert_row(row: dict, code_map: dict, with_code: bool = False) -> dict:
     # 1行分のデータのコードを名称に変換する（JSON出力用）
+    # with_code=True のとき、名称列の直前に「{label}_code」列を追加する
     # 例: {"@area": "00000", "$": "105.3"} → {"地域": "全国", "値": 105.3}
     converted = {}
     for key, value in row.items():
@@ -118,6 +119,8 @@ def convert_row(row: dict, code_map: dict) -> dict:
                 # コードを日本語名称に変換する
                 col_name = code_map[field_id]["label"]
                 codes    = code_map[field_id]["codes"]
+                if with_code:
+                    converted[col_name + "_code"] = value
                 converted[col_name] = codes.get(value, value)
             else:
                 converted[field_id] = value
@@ -125,9 +128,14 @@ def convert_row(row: dict, code_map: dict) -> dict:
     return converted
 
 
-def build_csv_columns(code_map: dict) -> list:
+def build_csv_columns(code_map: dict, with_code: bool = False) -> list:
     # CSVの固定列を決める：分類項目のlabel（定義順）＋ 単位 ＋ 値
-    columns = [info["label"] for info in code_map.values()]
+    # with_code=True のとき、各labelの直前に「{label}_code」列を挿入する
+    columns = []
+    for info in code_map.values():
+        if with_code:
+            columns.append(info["label"] + "_code")
+        columns.append(info["label"])
     columns.append("単位")
     columns.append("値")
     return columns
@@ -178,6 +186,8 @@ async def estat_meta(stats_data_id: str, request: Request):
     - `total_number` (str) フィルタ後の総件数。例: 12,480 件
     - `estimated_pages` (int) /pass が取得するページ数の見積もり（1ページ=10万件）
     - `parameters` (array) 指定可能なパラメータと選択肢の一覧
+      - 各選択肢は `code` / `name` / `level`（階層レベル） / `parent_code`（親コード）を持ちます
+      - 地域の場合、`level` で全国計・都道府県・市区町村を判別できます（表により有無あり）
 
     **使用例:**
     - /estat/meta/0003427113 … 全件の件数とパラメータ一覧
@@ -233,7 +243,7 @@ async def estat_meta(stats_data_id: str, request: Request):
             "parameter": f"cd{obj['@id'].capitalize()}",
             "name":      obj["@name"],
             "count":     len(classes),
-            "values":    [{"code": c["@code"], "name": c["@name"]} for c in classes]
+            "values":    [{"code": c["@code"], "name": c["@name"], "level": c.get("@level"), "parent_code": c.get("@parentCode")} for c in classes]
         })
 
     # フィルタ後件数を取得する（TOTAL_NUMBERは絞り込み条件を反映する）
@@ -265,6 +275,7 @@ async def estat_pass(stats_data_id: str, request: Request):
     **出力形式（任意）:**
     - `format=json` (既定) JSON形式で返します
     - `format=csv` CSV形式（UTF-8 BOM付き）で返します。大量データは軽量・高速です
+    - `with_code=true` (既定 false) 各分類項目に元コード列を併記します。例: `地域_code`=01100, `地域`=北海道 札幌市
 
     **クエリパラメータ（任意・e-Stat getStatsData にそのまま転送）:**
     - `cdArea` (str) 地域コード。カンマ区切りで複数指定可。例: 00000,13A01
@@ -295,6 +306,9 @@ async def estat_pass(stats_data_id: str, request: Request):
 
     # 出力形式を判定する（既定はjson）
     output_format = request.query_params.get("format", "json").lower()
+
+    # コード列を併記するか判定する（既定はfalse＝従来どおり名称のみ）
+    with_code = request.query_params.get("with_code", "false").lower() in ("true", "1", "yes")
 
     # ベースパラメータを構築する
     # 予約パラメータ（limit等）はユーザー指定を除外し、内部のページング制御を守る
@@ -410,7 +424,7 @@ async def estat_pass(stats_data_id: str, request: Request):
                     prefix    = b"" if first_row else b","
                     first_row = False
                     # orjson.dumpsはbytesを返し非ASCIIをUTF-8でそのまま出力する
-                    yield prefix + orjson.dumps(convert_row(row, code_map))
+                    yield prefix + orjson.dumps(convert_row(row, code_map, with_code))
                     total_sent += 1
 
                     # 8192行ごとにループへ制御を返す（実送出・先読みを進めるため）
@@ -434,7 +448,7 @@ async def estat_pass(stats_data_id: str, request: Request):
     # ── CSVストリーム ────────────────────────────────────
     async def stream_csv(first_values, client):
         # 固定列を決め、BOM付きヘッダー行を送出する
-        columns = build_csv_columns(code_map)
+        columns = build_csv_columns(code_map, with_code)
         buf     = io.StringIO()
         writer  = csv.writer(buf)
 
@@ -448,7 +462,7 @@ async def estat_pass(stats_data_id: str, request: Request):
             async for values in iter_pages(client, first_values):
                 for i, row in enumerate(values):
                     # 名称変換した辞書を固定列順に並べる（無い列は空欄）
-                    d = convert_row(row, code_map)
+                    d = convert_row(row, code_map, with_code)
                     writer.writerow([d.get(c, "") for c in columns])
 
                     # 1024行ごとにバッファを送出してメモリを解放する
