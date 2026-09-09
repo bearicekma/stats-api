@@ -12,6 +12,7 @@ import io
 import httpx
 import orjson
 import os
+import time
 
 router = APIRouter(prefix="/estat", tags=["estat"])
 
@@ -40,11 +41,36 @@ RESERVED_PARAMS = {
 
 # ── ユーティリティ関数 ──────────────────────────────────────
 
+async def get_and_log(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
+    # e-Statへの1リクエストを実行し、結果を標準出力に記録する
+    # Cloud Loggingに載るため429の発生パターンを後から追跡できる
+    # appIdは秘匿情報のため記録しない
+    started = time.monotonic()
+    resp    = await client.get(url, params=params)
+    elapsed = time.monotonic() - started
+
+    parts = []
+    parts.append("[estat]")
+    parts.append(url.rsplit("/", 1)[-1])
+    parts.append("id=" + str(params.get("statsDataId", "-")))
+    parts.append("start=" + str(params.get("startPosition", "-")))
+    parts.append("limit=" + str(params.get("limit", "-")))
+    parts.append("status=" + str(resp.status_code))
+    parts.append("elapsed=" + format(elapsed, ".2f") + "s")
+    parts.append("bytes=" + str(len(resp.content)))
+    if resp.status_code == 429:
+        parts.append("retry_after=" + str(resp.headers.get("retry-after")))
+
+    # flush=Trueで即座にCloud Loggingへ送出する
+    print(" ".join(parts), flush=True)
+    return resp
+
+
 async def get_with_retry(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
     # e-Statへのリクエストを行い、429の場合のみ短いバックオフで再試行する
     # Retry-Afterが返っていればそれを優先する（ただし上限10秒で打ち切る）
     for wait in ESTAT_RETRY_WAITS:
-        resp = await client.get(url, params=params)
+        resp = await get_and_log(client, url, params)
         if resp.status_code != 429:
             return resp
         retry_after = resp.headers.get("retry-after")
@@ -55,7 +81,7 @@ async def get_with_retry(client: httpx.AsyncClient, url: str, params: dict) -> h
         await asyncio.sleep(wait)
 
     # 最終試行（ここで429ならレスポンスをそのまま返し呼び出し側で処理させる）
-    return await client.get(url, params=params)
+    return await get_and_log(client, url, params)
 
 
 def raise_upstream(exc: httpx.HTTPStatusError):
@@ -336,7 +362,7 @@ async def estat_pass(stats_data_id: str, request: Request):
 
     stream_client = httpx.AsyncClient(timeout=300)
     try:
-        first_resp = await stream_client.get(ESTAT_GET_STATS_DATA, params=first_params)
+        first_resp = await get_with_retry(stream_client, ESTAT_GET_STATS_DATA, first_params)
         first_resp.raise_for_status()
         statistical_data = first_resp.json()["GET_STATS_DATA"]["STATISTICAL_DATA"]
     except httpx.HTTPStatusError as e:
