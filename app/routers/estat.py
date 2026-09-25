@@ -19,9 +19,15 @@ router = APIRouter(prefix="/estat", tags=["estat"])
 # 1リクエストあたりのe-Stat取得上限件数
 ESTAT_LIMIT = 100000
 
-# e-Stat APIへの同時リクエスト数 兼 先読みウィンドウ幅
-# 5では429（レート制限）を踏んだため3に引き下げ。メモリ抑制にも効く
-ESTAT_CONCURRENCY = 3
+# 先読みウィンドウ幅（何ページ分の取得予約を先に積んでおくか）
+# リクエスト自体はESTAT_PAGE_INTERVALのロックで1本ずつ飛ぶため、実際の同時接続数は常に1
+# 並列取得で429が多発したため5→3→1と引き下げ。未送出ページの滞留も防げる
+ESTAT_CONCURRENCY = 1
+
+# /pass で2ページ目以降を取得する際の待ち時間（秒）
+# 前回のe-Stat応答から、この秒数を空けて次のページを取得する
+# 実測では間隔3秒未満で429率85%、3〜60秒で33%、60秒以上で0%だった
+ESTAT_PAGE_INTERVAL = 30
 
 # 429（レート制限）時のリトライ設定
 # e-Statの制限は数分で解除されるが、長く待つとクライアント側がタイムアウトするため
@@ -386,6 +392,23 @@ async def estat_pass(stats_data_id: str, request: Request):
     if isinstance(first_values, dict):
         first_values = [first_values]
 
+    # ── ページ間の待ち時間を制御する ──────────────────────
+    # ロックで直列化するため、先読みタスクが複数あってもリクエストは1本ずつ飛ぶ
+    # 直前の応答完了時刻を記録し、ESTAT_PAGE_INTERVAL秒経つまで次の取得を待たせる
+    pace_lock = asyncio.Lock()
+    pace_last = [time.monotonic()]   # 1ページ目の取得直後の時刻で初期化する
+
+    async def fetch_page_paced(client: httpx.AsyncClient, start_pos: int) -> list:
+        async with pace_lock:
+            wait = ESTAT_PAGE_INTERVAL - (time.monotonic() - pace_last[0])
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                return await fetch_data_page(client, base_params, start_pos)
+            finally:
+                # 成功・失敗にかかわらず応答完了時刻を更新する
+                pace_last[0] = time.monotonic()
+
     # ── ページ境界を計算する ─────────────────────────────
     # 例: total=250000, LIMIT=100000 → startPosition = [1, 100001, 200001]
     start_positions = list(range(1, total_number + 1, ESTAT_LIMIT))
@@ -406,7 +429,7 @@ async def estat_pass(stats_data_id: str, request: Request):
 
         # 先読みウィンドウを初期充填する
         while next_idx < len(start_positions) and len(in_flight) < ESTAT_CONCURRENCY:
-            in_flight.append(asyncio.create_task(fetch_data_page(client, base_params, start_positions[next_idx])))
+            in_flight.append(asyncio.create_task(fetch_page_paced(client, start_positions[next_idx])))
             next_idx += 1
 
         try:
@@ -416,7 +439,7 @@ async def estat_pass(stats_data_id: str, request: Request):
 
                 # 次ページの取得を先行開始しウィンドウを補充する
                 if next_idx < len(start_positions):
-                    in_flight.append(asyncio.create_task(fetch_data_page(client, base_params, start_positions[next_idx])))
+                    in_flight.append(asyncio.create_task(fetch_page_paced(client, start_positions[next_idx])))
                     next_idx += 1
 
                 yield values
