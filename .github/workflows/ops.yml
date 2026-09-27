@@ -8,7 +8,7 @@ name: ops
 on:
   push:
     branches: [main]
-    paths: [ops/run.py]
+    paths: [ops/run.py, .github/workflows/ops.yml]
   workflow_dispatch:
 
 concurrency:
@@ -45,7 +45,7 @@ jobs:
         id: run
         run: |
           set -o pipefail
-          PYTHONUNBUFFERED=1 python ops/run.py 2>&1 | tee /tmp/ops_output.log
+          PYTHONPATH=. PYTHONUNBUFFERED=1 python ops/run.py 2>&1 | tee /tmp/ops_output.log
 
       - name: 認証情報を削除
         if: always()
