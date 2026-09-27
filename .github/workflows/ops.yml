@@ -1,0 +1,73 @@
+# 運用作業（GCSのデータ修正・マスタ作成など）を GitHub Actions で実行するワークフロー
+# - ops/run.py を変更して main に push すると自動実行（Actions 画面からの手動実行も可）
+# - 実行ログは ops-log ブランチに上書きで保存する（公開リポジトリなので集計以外は出力しないこと）
+# 使い方は ops/README.md を参照
+
+name: ops
+
+on:
+  push:
+    branches: [main]
+    paths: [ops/run.py]
+  workflow_dispatch:
+
+concurrency:
+  group: ops
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境をセットアップ（pipキャッシュあり）
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 依存パッケージをインストール（本番と同じ requirements.txt）
+        run: pip install -q -r requirements.txt
+
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: ops/run.py を実行
+        id: run
+        run: |
+          set -o pipefail
+          PYTHONUNBUFFERED=1 python ops/run.py 2>&1 | tee /tmp/ops_output.log
+
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
+
+      - name: 実行ログを ops-log ブランチに保存
+        if: always()
+        env:
+          STATUS: ${{ steps.run.outcome }}
+        run: |
+          mkdir -p /tmp/opslog && cd /tmp/opslog
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "status: ${STATUS}"
+            echo "finished_at: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+            echo "run_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "----"
+            cat /tmp/ops_output.log 2>/dev/null || echo "(出力なし)"
+          } > run.log
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add run.log
+          git commit -q -m "ops log: ${GITHUB_SHA::7} ${STATUS}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" HEAD:ops-log

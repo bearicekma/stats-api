@@ -3,6 +3,10 @@ name: Deploy to Cloud Run
 on:
   push:
     branches: [main]
+    # 運用作業（ops/）だけの変更では再デプロイしない
+    paths-ignore:
+      - 'ops/**'
+      - '.github/workflows/ops.yml'
 
 jobs:
   deploy:
