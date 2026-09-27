@@ -347,20 +347,35 @@ def to_record(raw: dict, link: dict, today: date) -> dict:
 
 # ---------- 市区町村コードの付与 ----------
 
+# 住所の表記揺れ・誤記の補正（求人票側 → _M_city 側の表記）
+CITY_TYPO = {"干曲市": "千曲市"}
+
+
+def _city_key(s) -> str:
+    # 照合用に表記を揃える（全角→半角、空白除去、「ヶ・ヵ・ｹ」を「ケ」に統一）
+    s = re.sub(r"\s", "", unicodedata.normalize("NFKC", str(s or "")))
+    return re.sub(r"[ヶヵｹ]", "ケ", s)
+
+
 def load_city_master(bucket) -> list[tuple[str, str, str]]:
     # 長野県の市区町村を (照合用の名前, 市区町村名, 5桁コード) で、名前の長い順に返す
     df = _read_parquet(bucket, CITY_PATH)
     if df is None:
         return []
     df = df[df["pref_code"].astype(str).str.zfill(2) == PREF_CODE]
-    rows = [(re.sub(r"^.+?郡", "", str(n)), str(n), str(c).zfill(5)) for n, c in zip(df["name"], df["code_5_digit"])]
+    rows = [(_city_key(re.sub(r"^.+?郡", "", str(n))), str(n), str(c).zfill(5)) for n, c in zip(df["name"], df["code_5_digit"])]
     return sorted(rows, key=lambda r: -len(r[0]))
 
 
 def match_city(address, cities) -> tuple[str | None, str | None]:
-    # 住所の先頭（都道府県名・郡名を除いた部分）が一致する市区町村を探す
-    s = re.sub(r"\s", "", str(address or ""))
-    s = re.sub(r"^長野県", "", s)
+    # 住所から市区町村を探す
+    # 「Ａ型事業所：長野県諏訪市…」「・長野県松本市…」のように前置きがある場合は「長野県」以降を使う
+    # 「長野県　中・南信地域…」「長野県・新潟県内の…」のように市区町村が1つに決まらない住所は None のまま
+    s = _city_key(address)
+    for wrong, right in CITY_TYPO.items():
+        s = s.replace(wrong, right)
+    pos = s.find("長野県")
+    s = s[pos + 3:] if pos >= 0 else re.sub(r"^[・:：\-]+", "", s)
     s = re.sub(r"^[^市町村]+?郡", "", s)
     for key, name, code in cities:
         if key and s.startswith(key):
@@ -487,6 +502,29 @@ def backfill_sangyo(yyyymm: str, dry_run: bool = True) -> pd.DataFrame:
         _write_parquet(bucket, path, df, schema=SCHEMA)
         print(f"✅ gs://{BUCKET_NAME}/{path} に保存")
     return df
+
+
+def refresh_codes(yyyymm: str, dry_run: bool = True) -> pd.DataFrame:
+    # 保存済みの月ファイルの市区町村コード・産業分類コードを、現在の照合ルールで付け直す（dry_run=True なら保存しない）
+    bucket = storage.Client().bucket(BUCKET_NAME)
+    path = f"{DATA_PREFIX}/{yyyymm}.parquet"
+    df = _read_parquet(bucket, path)
+    if df is None:
+        raise RuntimeError(f"{path} がありません")
+    before = normalize(df)
+    cities = load_city_master(bucket)
+    city = [match_city(a, cities) for a in before["就業場所_住所"]]
+    after = before.copy()
+    after["就業場所_市区町村"] = [c[0] for c in city]
+    after["就業場所_市区町村コード"] = [c[1] for c in city]
+    after = normalize(add_sangyo_codes(after, load_sangyo_master(bucket)))
+    changed = (before["就業場所_市区町村コード"].fillna("") != after["就業場所_市区町村コード"].fillna("")).sum()
+    print(f"{path}: {len(after)}件 / 市区町村コードあり {before['就業場所_市区町村コード'].notna().sum()} → {after['就業場所_市区町村コード'].notna().sum()}件（変更 {changed}件）"
+          f" / 小分類コードあり {after['産業分類_小分類コード'].notna().sum()}件")
+    if not dry_run:
+        _write_parquet(bucket, path, after, schema=SCHEMA)
+        print(f"✅ gs://{BUCKET_NAME}/{path} に保存")
+    return after
 
 
 # ---------- メイン ----------
