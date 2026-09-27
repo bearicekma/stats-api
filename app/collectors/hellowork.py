@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 import time
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -27,6 +28,7 @@ BUCKET_NAME     = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 DATA_PREFIX     = "hellowork/kyujin"
 LIST_PREFIX     = "hellowork/_list"
 CITY_PATH       = "master/_M_city/data.parquet"
+SANGYO_PATH     = "master/_M_sangyo/data.parquet"
 BASE_URL        = "https://www.hellowork.mhlw.go.jp/kensaku/"
 SEARCH_URL      = BASE_URL + "GECA110010.do"
 PREF_CODE       = "20"
@@ -59,7 +61,9 @@ NENSHO_PATTERN = re.compile(r"^nensho(\d+)(Nen)?$")
 # 詳細ページの項目ID → 列名（並び順がそのまま列順になる）
 FIELD_MAP = [
     ("uktkYmd", "受付年月日"), ("shkiKigenHi", "紹介期限日"), ("juriAtsh", "受理安定所"), ("kjKbn", "求人区分"),
-    ("onlinJishuOboUktkKahi", "オンライン自主応募"), ("sngBrui", "産業分類"), ("tryKoyoKibo", "トライアル雇用併用"),
+    ("onlinJishuOboUktkKahi", "オンライン自主応募"), ("sngBrui", "産業分類"),
+    ("*産業分類_大分類コード", "産業分類_大分類コード"), ("*産業分類_中分類コード", "産業分類_中分類コード"),
+    ("*産業分類_小分類コード", "産業分類_小分類コード"), ("tryKoyoKibo", "トライアル雇用併用"),
     ("jgshNo", "事業所番号"), ("jgshMei", "事業所名"), ("jgshMeiKana", "事業所名カナ"), ("szciYbn", "所在地_郵便番号"),
     ("szci", "所在地"), ("hoNinNo", "法人番号"), ("yshk", "代表者役職"), ("dhshaMei", "代表者名"),
     ("setsuritsuNen", "設立年"), ("shkn", "資本金"), ("rodoKumiai", "労働組合"), ("jigyoNy", "事業内容"),
@@ -364,6 +368,127 @@ def match_city(address, cities) -> tuple[str | None, str | None]:
     return None, None
 
 
+# ---------- 産業分類マスタ（_M_sangyo）とコードの付与 ----------
+# 元データ: ハローワークの産業分類コード一覧（日本標準産業分類 第14回改定・令和5年 準拠）
+SANGYO_LIST_URL = "https://www.hellowork.mhlw.go.jp/info/industry_list{:02d}.html"
+
+# 大分類（総務省の正式表記）と、所属する中分類コードの範囲
+DAI_RANGES = [
+    ("A", "農業，林業", 1, 2), ("B", "漁業", 3, 4), ("C", "鉱業，採石業，砂利採取業", 5, 5), ("D", "建設業", 6, 8),
+    ("E", "製造業", 9, 32), ("F", "電気・ガス・熱供給・水道業", 33, 36), ("G", "情報通信業", 37, 41),
+    ("H", "運輸業，郵便業", 42, 49), ("I", "卸売業，小売業", 50, 61), ("J", "金融業，保険業", 62, 67),
+    ("K", "不動産業，物品賃貸業", 68, 70), ("L", "学術研究，専門・技術サービス業", 71, 74),
+    ("M", "宿泊業，飲食サービス業", 75, 77), ("N", "生活関連サービス業，娯楽業", 78, 80), ("O", "教育，学習支援業", 81, 82),
+    ("P", "医療，福祉", 83, 85), ("Q", "複合サービス事業", 86, 87), ("R", "サービス業（他に分類されないもの）", 88, 96),
+    ("S", "公務（他に分類されるものを除く）", 97, 98), ("T", "分類不能の産業", 99, 99),
+]
+SANGYO_COLUMNS = ["code", "name", "chu_code", "chu_name", "dai_code", "dai_name", "is_kanri"]
+
+
+def _sangyo_key(s) -> str:
+    # 照合用に表記を揃える（全角→半角、空白と「，」「、」を除去）
+    return re.sub(r"[\s、,]", "", unicodedata.normalize("NFKC", str(s or "")))
+
+
+def _code_rows(html: str, width: int) -> list[tuple[str, str]]:
+    # ページ内の全ての表から「コード, 名称」の行を抜き出す（見出し行は除く）
+    rows = []
+    for tr in BeautifulSoup(html, "html.parser").find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all("td")]
+        code = unicodedata.normalize("NFKC", cells[0]).strip() if len(cells) >= 2 else ""
+        if re.fullmatch(r"\d{1,%d}" % width, code) and cells[1]:
+            rows.append((code.zfill(width), cells[1]))
+    return rows
+
+
+def build_sangyo_master(client: httpx.Client | None = None) -> pd.DataFrame:
+    # ハローワークの中分類・小分類ページから _M_sangyo を組み立て、件数と整合性を検証して返す
+    own = client is None
+    client = client or httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=60, follow_redirects=True)
+    try:
+        pages = {lv: client.get(SANGYO_LIST_URL.format(lv)).content.decode("utf-8") for lv in (2, 3)}
+    finally:
+        if own:
+            client.close()
+    chu = dict(_code_rows(pages[2], 2))
+    sho = pd.DataFrame(_code_rows(pages[3], 3), columns=["code", "name"]).drop_duplicates("code")
+    sho["chu_code"] = sho["code"].str[:2]
+    sho["chu_name"] = sho["chu_code"].map(chu)
+    dai = {f"{n:02d}": (c, name) for c, name, lo, hi in DAI_RANGES for n in range(lo, hi + 1)}
+    sho["dai_code"] = sho["chu_code"].map(lambda c: dai.get(c, (None, None))[0])
+    sho["dai_name"] = sho["chu_code"].map(lambda c: dai.get(c, (None, None))[1])
+    sho["is_kanri"] = sho["name"].str.startswith("管理，補助的経済活動を行う事業所")
+
+    problems = []
+    if len(chu) != 99:
+        problems.append(f"中分類が {len(chu)} 件（想定 99）")
+    if sho["chu_name"].isna().any() or sho["dai_code"].isna().any():
+        problems.append(f"中分類・大分類に対応しない小分類: {sho.loc[sho['chu_name'].isna() | sho['dai_code'].isna(), 'code'].tolist()[:10]}")
+    if sho["dai_code"].nunique() != 20 or len(sho) < 500:
+        problems.append(f"大分類 {sho['dai_code'].nunique()} 件 / 小分類 {len(sho)} 件（想定 20 / 500以上）")
+    if problems:
+        raise RuntimeError("産業分類コード表の形式が想定と違います: " + " / ".join(problems))
+    print(f"_M_sangyo: 大分類 {sho['dai_code'].nunique()} / 中分類 {sho['chu_code'].nunique()} / 小分類 {len(sho)} 件")
+    return sho[SANGYO_COLUMNS].sort_values("code").reset_index(drop=True)
+
+
+def save_sangyo_master(dry_run: bool = True) -> pd.DataFrame:
+    # _M_sangyo を作成して GCS に保存する（dry_run=True なら保存しない）
+    df = build_sangyo_master()
+    if not dry_run:
+        _write_parquet(storage.Client().bucket(BUCKET_NAME), SANGYO_PATH, df)
+        print(f"✅ gs://{BUCKET_NAME}/{SANGYO_PATH} に保存（{len(df)}件）")
+    return df
+
+
+def load_sangyo_master(bucket) -> pd.DataFrame | None:
+    return _read_parquet(bucket, SANGYO_PATH)
+
+
+def match_sangyo(name, master: pd.DataFrame | None) -> tuple[str | None, str | None, str | None]:
+    # 産業分類名 → (大分類, 中分類, 小分類コード)。完全一致を優先し、なければ前方一致が1件のときだけ採用
+    # （ハローワークの求人票は長い産業分類名を30字前後で切って表示するため）
+    if master is None or not name:
+        return None, None, None
+    key  = _sangyo_key(name)
+    keys = master["name"].map(_sangyo_key)
+    hit  = master[keys == key]
+    if hit.empty:
+        hit = master[keys.str.startswith(key)] if len(key) >= 8 else hit
+    if len(hit) != 1:
+        return None, None, None
+    r = hit.iloc[0]
+    return r["dai_code"], r["chu_code"], r["code"]
+
+
+def add_sangyo_codes(df: pd.DataFrame, master: pd.DataFrame | None) -> pd.DataFrame:
+    # データフレームの「産業分類」から3つのコード列を付け直す
+    codes = [match_sangyo(n, master) for n in df["産業分類"]]
+    df = df.copy()
+    df["産業分類_大分類コード"] = [c[0] for c in codes]
+    df["産業分類_中分類コード"] = [c[1] for c in codes]
+    df["産業分類_小分類コード"] = [c[2] for c in codes]
+    return df
+
+
+def backfill_sangyo(yyyymm: str, dry_run: bool = True) -> pd.DataFrame:
+    # 保存済みの月ファイルに産業分類コードを付け直す（dry_run=True なら保存しない）
+    bucket = storage.Client().bucket(BUCKET_NAME)
+    master = load_sangyo_master(bucket)
+    if master is None:
+        raise RuntimeError("_M_sangyo がありません。先に save_sangyo_master(dry_run=False) を実行してください")
+    path = f"{DATA_PREFIX}/{yyyymm}.parquet"
+    df = _read_parquet(bucket, path)
+    if df is None:
+        raise RuntimeError(f"{path} がありません")
+    df = normalize(add_sangyo_codes(normalize(df), master))
+    print(f"{path}: {len(df)}件 / 小分類コード付与 {df['産業分類_小分類コード'].notna().sum()}件 / 未付与の産業分類: {df.loc[df['産業分類_小分類コード'].isna(), '産業分類'].dropna().unique().tolist()[:10]}")
+    if not dry_run:
+        _write_parquet(bucket, path, df, schema=SCHEMA)
+        print(f"✅ gs://{BUCKET_NAME}/{path} に保存")
+    return df
+
+
 # ---------- メイン ----------
 
 def collect_hellowork(max_details: int = 200, dry_run: bool = False):
@@ -393,6 +518,7 @@ def collect_hellowork(max_details: int = 200, dry_run: bool = False):
 
         # 3. 詳細ページを取得（件数上限・時間上限・連続失敗で打ち切り）
         cities  = load_city_master(bucket)
+        sangyo  = load_sangyo_master(bucket)
         records, fails = [], 0
         for link in todo.head(max_details).to_dict("records"):
             if time.monotonic() - started > TIME_BUDGET or fails >= 5:
@@ -407,6 +533,7 @@ def collect_hellowork(max_details: int = 200, dry_run: bool = False):
                     raise ValueError("求人番号が見つかりません（掲載終了の可能性）")
                 rec = to_record(raw, link, today)
                 rec["就業場所_市区町村"], rec["就業場所_市区町村コード"] = match_city(rec.get("就業場所_住所"), cities)
+                rec["産業分類_大分類コード"], rec["産業分類_中分類コード"], rec["産業分類_小分類コード"] = match_sangyo(rec.get("産業分類"), sangyo)
                 records.append(rec)
                 fails = 0
             except Exception as e:

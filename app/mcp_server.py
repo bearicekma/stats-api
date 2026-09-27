@@ -96,7 +96,7 @@ async def stats_get_collection(
 @mcp.tool()
 async def master_get(
     collection_name: Annotated[str, Field(
-        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku"
+        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku / _M_sangyo"
     )],
     year: Annotated[Optional[str], Field(description="_M_calendarのみ: 年で絞込。例 2026")] = None,
     month: Annotated[Optional[str], Field(description="_M_calendarのみ: 月で絞込 1-12")] = None,
@@ -113,6 +113,7 @@ async def master_get(
     - _M_calendar        カレンダーマスタ（祝日・平日判定、1950年〜）
     - _M_country         国名マスタ（財務省貿易統計ベース）
     - _M_zairyu_shikaku  在留資格マスタ（e-Stat cat01ベース）
+    - _M_sangyo          産業分類マスタ（日本標準産業分類 令和5年改定、大・中・小分類）
 
     絞り込みパラメータは _M_calendar のみ有効。全件取得は重いため
     _M_calendar は year か from_date/to_date での絞込を推奨。

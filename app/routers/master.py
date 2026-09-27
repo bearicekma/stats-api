@@ -4,6 +4,7 @@
 # /master/_M_calendar : カレンダーマスタ（祝日・平日判定）
 # /master/_M_country  : 国名マスタ（財務省貿易統計 統計国名符号表ベース）
 # /master/_M_zairyu_shikaku : 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
+# /master/_M_sangyo   : 産業分類マスタ（日本標準産業分類 令和5年改定、大・中・小分類）
 
 from datetime import datetime
 
@@ -43,6 +44,7 @@ async def get_master(collection_name: str, request: Request):
     - `_M_country` 国名マスタ（財務省貿易統計 統計国名符号表ベース）
     - `_M_zairyu_shikaku` 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
     - `_M_age` 年齢マスタ（各歳・5歳階級・10歳階級・3区分・4区分・労働力調査型・学齢区分）
+    - `_M_sangyo` 産業分類マスタ（日本標準産業分類 第14回改定・令和5年、小分類536件）
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
@@ -109,6 +111,14 @@ async def get_master(collection_name: str, request: Request):
     - `age_labor_code` / `age_labor_name` 労働力調査型区分（15歳未満〜65歳以上の7区分）
     - `age_school_code` / `age_school_name` 学齢区分（未就学〜18歳以上の5区分）
 
+    **_M_sangyo のレスポンスフィールド（小分類1件につき1行）:**
+    - `code` (string) 小分類コード（3桁）
+    - `name` (string) 小分類名
+    - `chu_code` / `chu_name` 中分類コード（2桁）・中分類名
+    - `dai_code` / `dai_name` 大分類コード（A〜T）・大分類名（総務省の正式表記）
+    - `is_kanri` (bool) 「管理，補助的経済活動を行う事業所」（コード末尾0）か
+    - 出典: ハローワークインターネットサービス 産業分類コード一覧
+
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
@@ -119,6 +129,7 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_country` 国名マスタ一覧
     - `/master/_M_zairyu_shikaku` 在留資格マスタ一覧
     - `/master/_M_age` 年齢マスタ一覧
+    - `/master/_M_sangyo` 産業分類マスタ一覧
     """
     tmp_path = None
     try:
@@ -156,6 +167,7 @@ async def get_master(collection_name: str, request: Request):
             "_M_country":  "code",
             "_M_zairyu_shikaku": "sort_order",
             "_M_age": "age",
+            "_M_sangyo": "code",
         }
         order_col = order_map.get(collection_name)
         order_by  = f"ORDER BY {order_col}" if order_col else ""
