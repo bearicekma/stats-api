@@ -1,0 +1,23 @@
+# 一時的な確認用ワークフロー（tmp/sangyo-check ブランチ専用。確認後にブランチごと削除する）
+name: sangyo check (temporary)
+on:
+  push:
+    branches: [tmp/sangyo-check]
+    paths: [tmp/sangyo_check.py]
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q pandas lxml requests
+      - run: python tmp/sangyo_check.py 2>&1 | tee tmp/sangyo_log.txt
+      - run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -f tmp/*.txt tmp/*.csv
+          git commit -m "sangyo check result [skip ci]" && git push
