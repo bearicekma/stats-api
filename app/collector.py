@@ -7,6 +7,7 @@ from app.collectors.d_kanko    import collect_d_kanko_monthly
 from app.collectors.n_roudou   import collect_n_roudou_monthly
 from app.collectors.enecho     import collect_enecho_gasoline
 from app.collectors.jma        import collect_jma_nagano
+from app.collectors.hellowork  import collect_hellowork
 
 
 def _notify(source_name: str, count: int, error: str | None = None):
@@ -88,6 +89,19 @@ async def run_jma_collection():
         print(f"❌ エラー: jma: {e}")
         _notify("jma_nagano", 0, error=str(e))
         return 0
+
+
+async def run_hellowork_collection():
+    # ハローワーク 長野県新着求人の定期収集（Cloud Scheduler から夜間に15分おき・複数回）
+    # 0件は正常（取得済み・休日など）。例外時のみメール通知し、None を返す
+    try:
+        count = await asyncio.to_thread(collect_hellowork)
+        print(f"✅ hellowork: {count}件")
+        return count
+    except Exception as e:
+        print(f"❌ エラー: hellowork: {e}")
+        _notify("hellowork", 0, error=str(e))
+        return None
 
 
 async def run_all_collections():

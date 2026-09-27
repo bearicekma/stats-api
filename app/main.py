@@ -12,8 +12,9 @@ from app.collector     import (
     run_n_roudou_collection,
     run_enecho_collection,
     run_jma_collection,
+    run_hellowork_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename, ipss
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename, ipss, hellowork
 from app.mcp_server import mcp
 import contextlib
 
@@ -48,6 +49,7 @@ app.include_router(ocr.router)
 app.include_router(transcribe.router)
 app.include_router(drive_rename.router)
 app.include_router(ipss.router)
+app.include_router(hellowork.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 
@@ -56,6 +58,7 @@ COLLECTION_TARGETS = {
     "n_roudou":        run_n_roudou_collection,
     "enecho_gasoline": run_enecho_collection,
     "jma_nagano":      run_jma_collection,
+    "hellowork":       run_hellowork_collection,
 }
 
 
@@ -94,6 +97,7 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
     - `n_roudou` 長野労働局 求人統計（毎月末）
     - `enecho_gasoline` 資源エネルギー庁 ガソリン価格（毎週水曜、GitHub Actions経由）
     - `jma_nagano` 気象庁 長野県天気予報（毎朝6:00 JST）
+    - `hellowork` ハローワーク 長野県新着求人（毎晩 20:00〜20:45 に15分おき）
 
     **URL例:**
     - `/collect` 全ソース一括収集
@@ -123,6 +127,14 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
             "error":     f"{target} 収集失敗（リトライ上限まで到達）",
             "timestamp": str(datetime.now()),
         })
+
+    # hellowork も同期実行する（1回最大約8分。バックグラウンドだとレスポンス後にCPUが絞られ止まるため）。
+    # 取得済み・休日の0件は正常。例外時は関数内でメール通知し None が返る。
+    if target == "hellowork":
+        count = await func()
+        if count is not None:
+            return {"message": f"{target} 収集成功", "count": count, "timestamp": str(datetime.now())}
+        return JSONResponse(status_code=500, content={"error": f"{target} 収集失敗", "timestamp": str(datetime.now())})
 
     background_tasks.add_task(func)
     return {"message": f"{target} の収集を開始しました", "timestamp": str(datetime.now())}

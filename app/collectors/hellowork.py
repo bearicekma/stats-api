@@ -74,7 +74,7 @@ FIELD_MAP = [
     ("koyoKeitaiSsinJisseki", "正社員登用実績"), ("koyoKikan", "雇用期間"), ("koyoKikanSu", "雇用期間_期間"),
     ("koyoKikanYMD", "雇用期間_年月日"), ("koyoKikanKeiyakuKsnNoKnsi", "契約更新の可能性"),
     ("koyoKikanKeiyakuKsnNoJkn", "契約更新の条件"), ("hakenUkeoiToShgKeitai", "派遣・請負等"),
-    ("shgBs", "就業場所"), ("shgBsYubinNo", "就業場所_郵便番号"), ("shgBsJusho", "就業場所_住所"),
+    ("shgBs", "就業場所_補足"), ("shgBsYubinNo", "就業場所_郵便番号"), ("shgBsJusho", "就業場所_住所"),
     ("*就業場所_市区町村", "就業場所_市区町村"), ("*就業場所_市区町村コード", "就業場所_市区町村コード"),
     ("shgBsMyorEki", "就業場所_最寄り駅"), ("shgBsKotsuShudan", "就業場所_交通手段"), ("shgBsShyoJn", "就業場所_所要時間"),
     ("shgBsKitsuTsak", "受動喫煙対策"), ("shgBsKitsuTsakTkjk", "受動喫煙対策_特記"), ("mycarTskn", "マイカー通勤"),
