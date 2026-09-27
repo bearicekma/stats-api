@@ -193,6 +193,14 @@ def _form_state(form) -> list[tuple[str, str]]:
     return data
 
 
+def _as_form(pairs: list[tuple[str, str]]) -> dict[str, list[str]]:
+    # httpx はタプルのリストを受け付けないため、同名項目を値のリストにまとめた辞書に変換する
+    form: dict[str, list[str]] = {}
+    for k, v in pairs:
+        form.setdefault(k, []).append(v)
+    return form
+
+
 def _label_input(soup, text: str):
     # ラベルの文字列から対応する入力要素を探す
     lab = next((l for l in soup.find_all("label") if text in l.get_text()), None)
@@ -235,7 +243,7 @@ def _search_kind(client: httpx.Client, soup, kind: str, radio_label: str, box_id
     data += [("searchBtn", soup.find(id="ID_searchBtn").get("value", ""))]
 
     time.sleep(LIST_INTERVAL)
-    res = BeautifulSoup(client.post(SEARCH_URL, data=data).text, "html.parser")
+    res = BeautifulSoup(client.post(SEARCH_URL, data=_as_form(data)).text, "html.parser")
     errs = [e.get_text(" ", strip=True) for e in res.find_all(class_=re.compile("err", re.I)) if e.get_text(strip=True)]
     if errs:
         raise RuntimeError(f"検索エラー（{kind}）: {errs[:2]}")
@@ -251,7 +259,7 @@ def _search_kind(client: httpx.Client, soup, kind: str, radio_label: str, box_id
             break
         page_form = res.find("form", id="ID_form_1") or res.find("form")
         time.sleep(LIST_INTERVAL)
-        res = BeautifulSoup(client.post(SEARCH_URL, data=_form_state(page_form) + [nxt]).text, "html.parser")
+        res = BeautifulSoup(client.post(SEARCH_URL, data=_as_form(_form_state(page_form) + [nxt])).text, "html.parser")
 
     print(f"hellowork: {kind} 一覧 {len(links)}件 / 検索件数 {total}件 / {page}ページ")
     return links
