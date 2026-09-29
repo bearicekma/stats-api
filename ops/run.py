@@ -1,9 +1,14 @@
-# 目的：hellowork 9月分の市区町村コードを、改善した照合ルールで付け直す
-# 内容：refresh_codes('202609') を実行する。DRY_RUN=True のうちは件数の変化を表示するだけで保存しない
+# 目的：資本金列の表記パターンを調べる（GCS を読むだけで書き込まない）
+# 内容：全月ファイルの資本金を、数字を「9」に置き換えた形に集計して件数を表示する（公開ログのため値そのものは出さない）
 
-from app.collectors import hellowork as hw
+import io
+import os
+import re
 
-DRY_RUN = False
+import pandas as pd
+from google.cloud import storage
 
-df = hw.refresh_codes("202609", dry_run=DRY_RUN)
-print("未付与の就業場所（先頭12文字）:", [str(a).replace(" ", "")[:12] for a in df.loc[df["就業場所_市区町村コード"].isna(), "就業場所_住所"]])
+bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
+s = pd.concat([pd.read_parquet(io.BytesIO(b.download_as_bytes()), columns=["資本金"])["資本金"] for b in bucket.list_blobs(prefix="hellowork/kyujin/")])
+print(f"件数 {len(s)} / 空欄 {s.isna().sum()}")
+print(s.dropna().map(lambda v: re.sub(r"[0-9０-９]", "9", str(v))).value_counts().to_string())
