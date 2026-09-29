@@ -10,7 +10,7 @@ from google.cloud import storage
 
 from app.collectors import hellowork as hw
 
-DRY_RUN = True
+DRY_RUN = False
 
 bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
 for blob in sorted(bucket.list_blobs(prefix="hellowork/kyujin/"), key=lambda b: b.name):
