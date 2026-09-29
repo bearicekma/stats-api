@@ -129,7 +129,7 @@ ID_TO_COL = {k: v for k, v in FIELD_MAP if not k.startswith("*")}
 HEAD_COLS = ["求人番号", "求人種別", "就業形態", "取得日", "取得月"]
 COLUMNS   = HEAD_COLS + [v for _, v in FIELD_MAP] + ["その他項目"]
 DATE_COLS = {"取得日", "受付年月日", "紹介期限日"}
-INT_COLS  = {"従業員数_企業全体", "従業員数_就業場所", "従業員数_うち女性", "従業員数_うちパート", "年間休日数", "賃金下限", "賃金上限"}
+INT_COLS  = {"従業員数_企業全体", "従業員数_就業場所", "従業員数_うち女性", "従業員数_うちパート", "年間休日数", "賃金下限", "賃金上限", "資本金"}
 SCHEMA    = pa.schema([(c, pa.date32() if c in DATE_COLS else pa.int64() if c in INT_COLS else pa.string()) for c in COLUMNS])
 
 
@@ -166,6 +166,8 @@ def _write_parquet(bucket, path: str, df: pd.DataFrame, schema: pa.Schema | None
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     # 列順と型をスキーマに揃える（整数は欠損ありの Int64、日付は datetime.date、それ以外は文字列）
     df = df.reindex(columns=COLUMNS)
+    # 資本金は「8,550万円」形式の文字列で保存されていた月もあるため、円単位の整数に直してから型を揃える
+    df["資本金"] = df["資本金"].map(_yen)
     for c in COLUMNS:
         if c in INT_COLS:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
@@ -298,6 +300,20 @@ def _first_int(s):
     return int(m.group(0).replace(",", "")) if m else None
 
 
+def _yen(v):
+    # 「8,550万円」「1億2,000万円」「9,999億円」などを円単位の整数にする（数値はそのまま、解釈できなければ None）
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NA:
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = re.sub(r"[\s,]", "", unicodedata.normalize("NFKC", str(v)))
+    m = re.fullmatch(r"(?:(\d+)億)?(?:(\d+)万)?(\d+)?円", s)
+    if not m or not any(m.groups()):
+        return None
+    oku, man, yen = (int(g) if g else 0 for g in m.groups())
+    return oku * 100_000_000 + man * 10_000 + yen
+
+
 def _wage_range(s):
     nums = [int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", str(s or ""))]
     return (nums[0], nums[1] if len(nums) > 1 else nums[0]) if nums else (None, None)
@@ -330,6 +346,11 @@ def to_record(raw: dict, link: dict, today: date) -> dict:
         used.update(k for k in raw if NENSHO_PATTERN.match(k))
 
     rest = {k: v for k, v in raw.items() if k not in used and k != "kjNo"}
+    # 資本金は円単位の整数で保存する。解釈できない表記は原文を「その他項目」に残す
+    capital = rec.get("資本金")
+    rec["資本金"] = _yen(capital)
+    if capital and rec["資本金"] is None and capital not in ("-", "なし"):
+        rest["資本金_原文"] = capital
     rec["その他項目"] = json.dumps(rest, ensure_ascii=False) if rest else None
 
     rec["求人番号"] = raw.get("kjNo")
