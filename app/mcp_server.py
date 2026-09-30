@@ -453,3 +453,44 @@ async def jma_nagano(
     return await _get("/jma/nagano", {
         "location": location, "from": from_date, "to": to_date,
     })
+
+
+# =============================================================================
+# 地方財政状況調査（総務省）
+# =============================================================================
+
+@mcp.tool()
+async def chizai_meta(
+    hyo: Annotated[Optional[str], Field(description="表番号2桁。省略時は表の一覧を返す。例: 02")] = None,
+) -> str:
+    """地方財政状況調査（都道府県分 調査表）の表一覧、または指定した表の行・列の一覧を返す。
+
+    chizai_get の前に使う。hyo 省略で表番号・表名称・収録年度の一覧、
+    hyo 指定でその表の行番号・列番号と名称の一覧。
+    e-StatのDB（estat_pass）は2017年度で更新停止のため、それ以降はこちらを使う。
+    """
+    if hyo is None:
+        return await _get("/chizai/tables", {"kubun": "pref"})
+    return await _get("/chizai/meta", {"kubun": "pref", "hyo": hyo})
+
+
+@mcp.tool()
+async def chizai_get(
+    hyo: Annotated[str, Field(description="表番号2桁。例: 02（決算収支の状況）")],
+    nendo_from: Annotated[Optional[int], Field(description="決算年度（西暦）の開始。例: 2018")] = None,
+    nendo_to: Annotated[Optional[int], Field(description="決算年度（西暦）の終了。例: 2024")] = None,
+    dantai: Annotated[Optional[str], Field(description="団体コード6桁 または 市区町村コード5桁。カンマ区切り。例: 20000（長野県）、00000（全国）")] = None,
+    gyo: Annotated[Optional[str], Field(description="行番号。カンマ区切り。例: 01")] = None,
+    retsu: Annotated[Optional[str], Field(description="列番号。カンマ区切り。例: 001,005")] = None,
+    limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
+) -> str:
+    """総務省「地方財政状況調査」都道府県分 調査表の数値を縦持ちで取得する（1989年度〜最新）。
+
+    番号は chizai_meta で確認する。金額は原則千円。全国計は団体コード 000000。
+    表02（決算収支）は行01=当年度・行02=前年度なので、推移を見るときは gyo=01。
+    応答が大きくなりやすいため、hyo に加えて dantai・retsu・年度で絞ること。
+    """
+    return await _get("/chizai/data", {
+        "kubun": "pref", "hyo": hyo, "nendo_from": nendo_from, "nendo_to": nendo_to,
+        "dantai": dantai, "gyo": gyo, "retsu": retsu, "limit": limit, "format": "json",
+    })

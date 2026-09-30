@@ -1,0 +1,54 @@
+# 地方財政状況調査（総務省）調査表CSVの収集ワークフロー
+# - 手動実行: Actions 画面で mode を選ぶ（dryrun=確認のみ / full=全期間取り直し / update=差分）
+# - 定期実行: 毎月6日 06:00 JST に update（年1回・3月末ごろの公開を拾う）
+# 公開リポジトリのためログは公開される。appId など秘匿情報は出力しないこと
+
+name: collect-chizai
+
+on:
+  schedule:
+    - cron: '0 21 5 * *'   # 毎月5日 21:00 UTC = 6日 06:00 JST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dryrun / full / update'
+        required: true
+        default: 'dryrun'
+        type: choice
+        options: [dryrun, full, update]
+
+concurrency:
+  group: collect-chizai
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300   # 初回（full）は約1,800ファイルで1〜2時間の見込み
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージをインストール
+        run: pip install httpx pandas pyarrow google-cloud-storage
+
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: 収集スクリプトを実行
+        env:
+          ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
+        run: PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} pref
+
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
