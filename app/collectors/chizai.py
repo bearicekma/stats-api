@@ -267,7 +267,12 @@ def run(kubun: str = "pref", mode: str = "dryrun") -> int:
             if old is not None:
                 old = old[~old["決算年度"].isin(add["決算年度"].unique())]
                 add = pd.concat([old, add], ignore_index=True)
-            add = add.drop_duplicates(subset=KEY_COLS[:2] + ["行番号", "列番号"], keep="last")
+            # 完全に同一の行だけ除く。キー重複（同じ年度・団体・行・列で値が別）は消さずに警告する
+            add = add.drop_duplicates()
+            dup = add.duplicated(subset=["決算年度", "団体コード", "行番号", "列番号"], keep=False)
+            if dup.any():
+                yrs = sorted(add.loc[dup, "決算年度"].unique().tolist())
+                print(f"⚠️ 表{hyo}: キー重複 {int(dup.sum())}件 年度={yrs}", flush=True)
             add = add.sort_values(SORT_COLS).reset_index(drop=True)
             _save_df(add, path)
             t, m = _index_rows(add)
