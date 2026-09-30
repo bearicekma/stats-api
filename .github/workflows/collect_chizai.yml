@@ -21,6 +21,9 @@ concurrency:
   group: collect-chizai
   cancel-in-progress: false
 
+permissions:
+  contents: write   # 実行ログを chizai-log ブランチに保存するため
+
 jobs:
   collect:
     runs-on: ubuntu-latest
@@ -45,10 +48,37 @@ jobs:
           echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
 
       - name: 収集スクリプトを実行
+        id: run
         env:
           ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
-        run: PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} pref
+        run: |
+          set -o pipefail
+          PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} pref 2>&1 | tee /tmp/chizai_output.log
 
       - name: 認証情報を削除
         if: always()
         run: rm -f /tmp/sa_key.json
+
+      # ops.yml と同じ方式。Actionsのログ本体を外部から読めない環境向けに、ブランチへ上書き保存する
+      - name: 実行ログを chizai-log ブランチに保存
+        if: always()
+        env:
+          STATUS: ${{ steps.run.outcome }}
+          MODE: ${{ github.event.inputs.mode || 'update' }}
+        run: |
+          mkdir -p /tmp/chizailog && cd /tmp/chizailog
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "mode: ${MODE}"
+            echo "status: ${STATUS}"
+            echo "finished_at: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+            echo "run_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "----"
+            cat /tmp/chizai_output.log 2>/dev/null || echo "(出力なし)"
+          } > run.log
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add run.log
+          git commit -q -m "chizai log: ${MODE} ${STATUS}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" HEAD:chizai-log
