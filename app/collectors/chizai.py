@@ -232,7 +232,7 @@ def _group_names(rows: pd.DataFrame, merge_contained: bool) -> list[dict]:
 
 def _table_groups(df: pd.DataFrame) -> list[dict]:
     # 1つの表番号の中で、表名称を「同じ表」の塊にまとめる。次のどちらかなら同じ表とみなす
-    #   (1) 正規化した名称が一致する、または一方が他方に含まれる（省略形）
+    #   (1) 正規化した名称が一致する、一方が他方に含まれる（省略形）、または「その○」の番号だけが違う
     #   (2) 行・列の項目名が半分以上重なる（「その3」→「その2」の繰り上げなど、改名だけのもの）
     nm = df.groupby(["決算年度", "表名称"], dropna=False).size().reset_index(name="件数")
     nm["キー"] = nm["表名称"].map(_norm)
@@ -248,9 +248,15 @@ def _table_groups(df: pd.DataFrame) -> list[dict]:
     def union(a, b):
         parent[find(a)] = find(b)
 
+    def drop_sono(k):
+        return re.sub(r"その\d+", "", k)
+
     for a in keys:
         for b in keys:
-            if a != b and len(a) >= 4 and a in b:
+            if a == b:
+                continue
+            # 省略形（一方が他方に含まれる）、または「その3」→「その2」のような番号の繰り上げだけの違い
+            if (len(a) >= 4 and a in b) or (drop_sono(a) and drop_sono(a) == drop_sono(b)):
                 union(a, b)
 
     it = df[["表名称", "行名称", "列名称"]].drop_duplicates()
