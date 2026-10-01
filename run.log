@@ -1,0 +1,143 @@
+commit: 3793e8a29ad5ccf2f4f4349f7225ff57eda79cc7
+mode: reindex
+status: success
+finished_at: 2026-10-01 21:32:20 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/36862104378
+----
+🚀 地方財政状況調査 収集開始 mode=reindex kubun=pref
+[reindex] chizai/pref/00/data.parquet 表名称1種 行列4件
+[reindex] chizai/pref/01/data.parquet 表名称3種 行列46件
+[reindex] chizai/pref/02/data.parquet 表名称1種 行列12件
+[reindex] chizai/pref/03/data.parquet 表名称1種 行列31件
+[reindex] chizai/pref/04/data.parquet 表名称1種 行列734件
+[reindex] chizai/pref/05/data.parquet 表名称1種 行列92件
+[reindex] chizai/pref/06/data.parquet 表名称1種 行列149件
+[reindex] chizai/pref/07/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/08/data.parquet 表名称1種 行列58件
+[reindex] chizai/pref/09/data.parquet 表名称1種 行列67件
+[reindex] chizai/pref/10/data.parquet 表名称1種 行列64件
+[reindex] chizai/pref/11/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/12/data.parquet 表名称1種 行列146件
+[reindex] chizai/pref/13/data.parquet 表名称1種 行列73件
+[reindex] chizai/pref/15/data.parquet 表名称1種 行列83件
+[reindex] chizai/pref/16/data.parquet 表名称1種 行列393件
+[reindex] chizai/pref/17/data.parquet 表名称1種 行列165件
+[reindex] chizai/pref/18/data.parquet 表名称1種 行列30件
+[reindex] chizai/pref/19/data.parquet 表名称1種 行列93件
+[reindex] chizai/pref/20/data.parquet 表名称1種 行列65件
+[reindex] chizai/pref/21/data.parquet 表名称1種 行列74件
+[reindex] chizai/pref/22/data.parquet 表名称1種 行列65件
+[reindex] chizai/pref/23/data.parquet 表名称1種 行列78件
+[reindex] chizai/pref/24/data.parquet 表名称1種 行列62件
+[reindex] chizai/pref/25/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/26/data.parquet 表名称1種 行列27件
+[reindex] chizai/pref/27/data.parquet 表名称1種 行列29件
+[reindex] chizai/pref/28/data.parquet 表名称2種 行列17件
+[reindex] chizai/pref/29/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/30/data.parquet 表名称1種 行列69件
+[reindex] chizai/pref/31/data.parquet 表名称1種 行列21件
+[reindex] chizai/pref/32/data.parquet 表名称1種 行列18件
+[reindex] chizai/pref/33/data.parquet 表名称1種 行列23件
+[reindex] chizai/pref/34/data.parquet 表名称1種 行列39件
+[reindex] chizai/pref/35/data.parquet 表名称1種 行列17件
+[reindex] chizai/pref/36/data.parquet 表名称1種 行列60件
+[reindex] chizai/pref/37/data.parquet 表名称1種 行列848件
+[reindex] chizai/pref/38/data.parquet 表名称2種 行列89件
+[reindex] chizai/pref/39/data.parquet 表名称1種 行列213件
+[reindex] chizai/pref/40/data.parquet 表名称1種 行列69件
+[reindex] chizai/pref/41/data.parquet 表名称1種 行列102件
+[reindex] chizai/pref/42/data.parquet 表名称1種 行列23件
+[reindex] chizai/pref/45/data.parquet 表名称1種 行列25件
+[reindex] chizai/pref/46/data.parquet 表名称2種 行列443件
+[reindex] chizai/pref/47/data.parquet 表名称1種 行列416件
+[reindex] chizai/pref/48/data.parquet 表名称1種 行列31件
+[reindex] chizai/pref/49/data.parquet 表名称2種 行列42件
+[reindex] chizai/pref/50/data.parquet 表名称1種 行列36件
+[reindex] chizai/pref/51/data.parquet 表名称1種 行列134件
+[reindex] chizai/pref/52/data.parquet 表名称1種 行列123件
+[reindex] chizai/pref/53/data.parquet 表名称2種 行列92件
+[reindex] chizai/pref/54/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/55/data.parquet 表名称1種 行列60件
+[reindex] chizai/pref/56/data.parquet 表名称1種 行列57件
+[reindex] chizai/pref/57/data.parquet 表名称1種 行列54件
+[reindex] chizai/pref/58/data.parquet 表名称1種 行列113件
+[reindex] chizai/pref/59/data.parquet 表名称1種 行列66件
+[reindex] chizai/pref/60/data.parquet 表名称1種 行列53件
+[reindex] chizai/pref/61/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/62/data.parquet 表名称1種 行列60件
+[reindex] chizai/pref/63/data.parquet 表名称1種 行列57件
+[reindex] chizai/pref/64/data.parquet 表名称1種 行列54件
+[reindex] chizai/pref/65/data.parquet 表名称1種 行列113件
+[reindex] chizai/pref/66/data.parquet 表名称1種 行列66件
+[reindex] chizai/pref/69/data.parquet 表名称1種 行列100件
+[reindex] chizai/pref/70/data.parquet 表名称1種 行列219件
+[reindex] chizai/pref/71/data.parquet 表名称1種 行列17件
+[reindex] chizai/pref/72/data.parquet 表名称1種 行列32件
+[reindex] chizai/pref/73/data.parquet 表名称1種 行列199件
+[reindex] chizai/pref/74/data.parquet 表名称1種 行列44件
+[reindex] chizai/pref/75/data.parquet 表名称1種 行列165件
+[reindex] chizai/pref/76/data.parquet 表名称1種 行列171件
+[reindex] chizai/pref/77/data.parquet 表名称1種 行列56件
+[reindex] chizai/pref/80/data.parquet 表名称1種 行列51件
+[reindex] chizai/pref/84/data.parquet 表名称1種 行列75件
+[reindex] chizai/pref/85/data.parquet 表名称1種 行列74件
+[reindex] chizai/pref/86/data.parquet 表名称1種 行列74件
+[reindex] chizai/pref/87/data.parquet 表名称1種 行列33件
+[reindex] chizai/pref/88/data.parquet 表名称1種 行列15件
+[reindex] chizai/pref/90/data.parquet 表名称1種 行列179件
+[reindex] chizai/pref/91/data.parquet 表名称2種 行列53件
+[reindex] chizai/pref/92/data.parquet 表名称1種 行列43件
+[reindex] chizai/pref/93/data.parquet 表名称1種 行列78件
+[reindex] chizai/pref/94/data.parquet 表名称1種 行列34件
+[reindex] chizai/pref/95/data.parquet 表名称1種 行列19件
+[reindex] chizai/pref/96/data.parquet 表名称1種 行列19件
+✅ gs://stats-api-491107-data/chizai/pref/_tables.parquet (94件)
+✅ gs://stats-api-491107-data/chizai/pref/_meta.parquet (8429件)
+🔀 同じ表番号に別の表があるもの: 7表番号
+表番号  決算年度_最初  決算年度_最新  年度数                           表名称
+ 01     1989     2006   18                         団体の概況
+ 01     2007     2007    1        平成19年・地方財政状況調査表（都道府県分）
+ 01     2008     2024   17        令和6年度・地方財政状況調査表（都道府県分）
+ 28     1989     2007   18       投資的経費の状況・その4　失業対策事業費の状況
+ 28     1998     1998    1                           NaN
+ 38     1989     2006   18   地方債の状況・その2　繰上償還額及び公債費比率等の状況
+ 38     2007     2009    3 地方債の状況・その2　繰上償還額及び実質公債費比率等の状況
+ 46     1989     2004   16                   公共用地先行取得の状況
+ 46     2011     2024   14      歳入の状況・その1　歳入内訳（復旧・復興事業分）
+ 49     1989     2002   14                     土地開発基金の状況
+ 49     2012     2024   13              繰越額等の状況（全国防災事業分）
+ 53     1989     2002   14                 地域改善対策特定事業の状況
+ 53     2011     2024   14     復旧・復興事業経費の歳出内訳及び財源内訳（その1）
+ 91     2004     2007    4                   職員給及び職員数の状況
+ 91     2008     2024   17                        職員給の状況
+📝 表記ゆれをまとめたもの: 28件
+表番号                             表名称                                                                                                                                                                                                                                              表記ゆれ
+ 04                  歳入の状況・その1　歳入内訳                                                                                                                                                                                                                                          その1　歳入内訳
+ 05                 歳入の状況・その2　収入の状況                                                                                                                                                                                                                 歳入の状況・その3　収入の内訳 / 歳入の状況・その3　収入の状況
+ 17                           歳出の状況                                                                                                                                                                                     歳出の状況・その3　各種手当の単価等の状況，その4　高等学校使用料等の状況 / 歳出の状況・その3　各種手当の単価等の状況
+ 18    歳出の状況・その3　性質別歳出の内訳・（1）物件費の状況                                                                                                                         歳出の状況・その5　性質別歳出の内訳・（1）物件費の状況 / 歳出の状況・その5　性質別歳出の内訳・（1）物件費の内訳 / 歳出の状況・その4　性質別歳出の内訳・（1）物件費の内訳 / 歳出の状況・その3　性質別歳出の内訳・（1）物件費の内訳
+ 19   歳出の状況・その3　性質別歳出の内訳・（2）補助費等の状況 歳出の状況・その5　性質別歳出の状況・（2）補助費等の状況，（3）維持補修費及び交際費の状況，（4）生活保護の状況 / 歳出の状況・その5　性質別歳出の内訳・（2）補助費等の状況，（3）維持補修費及び交際費の状況，（4）生活保護の状況 / 歳出の状況・その5　性質別歳出の内訳・（2）補助費等の状況，（3）維持補修費及び公債費の状況，（4）生活保護の状況 / 歳出の状況・その5　性質別歳出の内訳・（2）補助費等の状況 / 歳出の状況・その4　性質別歳出の内訳・（2）補助費等の状況
+ 20   歳出の状況・その4　維持補修費及び受託事業費の目的別の状況                                                                                                                                                                                     歳出の状況・その6　維持補修費及び受託事業費の目的別の状況 / 歳出の状況・その5　維持補修費及び受託事業費の目的別の状況
+ 31            基金の状況・その1　積立基金現在高の状況                                                                                                                                                                                                             基金の状況・その1　積立基金現在高の状況，その2　定額運用基金現在高の状況
+ 32          基金の状況・その3　その他特定目的基金の状況                                                                                                                                                                                                              基金の状況・その3　その他特定目的基金・その他定額運用基金取崩し等の状況
+ 39      地方債の状況・その2　借入先別及び利率別現在高の状況                                                                                                                                                                                                                        地方債の状況・その3　借入先別及び利率別現在高の状況
+ 40              地方債の状況・その3　年度別償還状況                                                                                                                                                                                                                                地方債の状況・その4　年度別償還状況
+ 41                       債務負担行為の状況                                                                                                                                                                                                                           債務負担行為の状況・その1　債務負担行為の状況
+ 47         歳入の状況・その1　歳入内訳（全国防災事業分）                                                                                                                                                                                                                        歳入の状況・その1　歳入内訳（緊急防災・減災事業分）
+ 49                繰越額等の状況（全国防災事業分）                                                                                                                                                                                                                               繰越額等の状況（緊急防災・減災事業分）
+ 50   （5）扶助費の内訳（補助費等のうち扶助費的なものを含む。）                                                                                                                                                                                                  歳出の状況・その5　性質別歳出の内訳・（5）扶助費の内訳（補助費等のうち扶助費的なものを含む。）
+ 60        全国防災事業経費の歳出内訳及び財源内訳（その1）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その1）
+ 61        全国防災事業経費の歳出内訳及び財源内訳（その2）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その2）
+ 62        全国防災事業経費の歳出内訳及び財源内訳（その3）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その3）
+ 63        全国防災事業経費の歳出内訳及び財源内訳（その4）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その4）
+ 64        全国防災事業経費の歳出内訳及び財源内訳（その5）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その5）
+ 65        全国防災事業経費の歳出内訳及び財源内訳（その6）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その6）
+ 66        全国防災事業経費の歳出内訳及び財源内訳（その7）                                                                                                                                                                                                                       緊急防災・減災事業経費の歳出内訳及び財源内訳（その7）
+ 74               公立大学附属病院事業会計決算の状況                                                                                                                                                                                                                                 公立大学付属病院事業会計決算の状況
+ 84  投資的経費の状況・その2　用地取得費の状況・（1）補助事業費                                                                                                                                                                                                                     投資的経費の状況・その2　用地取得の状況・（1）補助事業費
+ 85  投資的経費の状況・その2　用地取得費の状況・（2）単独事業費                                                                                                                                                                                                                     投資的経費の状況・その2　用地取得の状況・（2）単独事業費
+ 86     投資的経費の状況・その2　用地取得費の状況・（3）合計                                                                                                                                                                                                                        投資的経費の状況・その2　用地取得の状況・（3）合計
+ 88 投資的経費の状況・その2　用地取得費の状況・（4）取得先別内訳                                                                                                                                                                                                                    投資的経費の状況・その2　用地取得の状況・（4）取得先別内訳
+ 95  基金の状況（復旧・復興事業分）・その1　積立基金現在高の状況                                                                                                                                                                                                                                   基金の状況（復旧・復興事業分）
+ 96   基金の状況（全国防災事業分）・その1　積立基金現在高の状況                                                                                                                                                                                                                基金の状況（緊急防災・減災事業分） / 基金の状況（全国防災事業分）
+✅ 終了: 86表
