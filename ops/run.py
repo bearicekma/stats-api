@@ -1,73 +1,17 @@
-# 目的：地方財政状況調査 表15・37・39の項目対応表づくり（読み取りのみ・GCSへの書き込みなし）
-# 内容：e-Stat旧DB（〜2017年度）は「行の項目(cat03)×列の指標(cat01)」の2次元。CSVの各セルの
-#       「全国＋47都道府県」の値の並びと一致する旧DBのセルを探し、行→cat03・列→cat01 の対応を年度ごとに多数決で決める。
-#       あわせて各年度のCSVの行・列の名称と全国計の値を出力する。出力は公表済みの集計値・名称・コードだけ
-
-import collections
-import io
-import os
-
+# 目的：本番の /chizai/data（item・shihyo 指定）の動作確認（読み取りのみ）
 import httpx
-import pandas as pd
-from google.cloud import storage
 
 API = "https://stats-api-709252231118.asia-northeast1.run.app"
-TARGETS = [("15", "0003173109"), ("37", "0003173057"), ("39", "0003173097")]
-bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-
-for hyo, dbid in TARGETS:
-    meta = httpx.get(f"{API}/estat/meta/{dbid}", timeout=300).json()
-    pname = {}
-    for p in meta["parameters"]:
-        if p["parameter"] in ("cdCat01", "cdCat03"):
-            pname[p["parameter"]] = p["name"]
-            for v in p["values"]:
-                print(f"CAT,{hyo},{p['parameter']},{v['code']},{v.get('level')},{v.get('parent_code')},{v['name']}")
-    r = httpx.get(f"{API}/estat/pass/{dbid}", params={"format": "csv", "with_code": "true"}, timeout=1500)
-    r.raise_for_status()
-    db = pd.read_csv(io.BytesIO(r.content), encoding="utf-8-sig", dtype=str)
-    c1, c3 = pname["cdCat01"] + "_code", pname["cdCat03"] + "_code"
-    area = [c for c in db.columns if c.endswith("_code") and "団体" in c][0]
-    tcol = [c for c in db.columns if c.endswith("_code") and "時間" in c][0]
-    db = db[db["値"].notna()]
-    db["値"] = pd.to_numeric(db["値"], errors="coerce").fillna(0).round().astype("int64")
-    db["地域"] = db[area].str.zfill(5)
-    print(f"DB {hyo} {dbid} {len(db)}件 列={list(db.columns)}")
-
-    csv = pd.read_parquet(io.BytesIO(bucket.blob(f"chizai/pref/{hyo}/data.parquet").download_as_bytes()))
-    csv["値"] = pd.to_numeric(csv["値"], errors="coerce").fillna(0).round().astype("int64")
-    areas = sorted(set(db["地域"]) & set(csv["市区町村コード"]))
-    for tc in sorted(db[tcol].unique()):
-        y = int(tc[:4])
-        cy = csv[csv["決算年度"] == y]
-        if cy.empty:
-            continue
-        dv = db[db[tcol] == tc].pivot_table(index=[c3, c1], columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
-        cv = cy.pivot_table(index=["行番号", "列番号"], columns="市区町村コード", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
-        index = collections.defaultdict(list)
-        for key, row in dv.iterrows():
-            t = tuple(row.tolist())
-            if any(t):
-                index[t].append(key)
-        rv, cvote = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter)
-        for (g, c), row in cv.iterrows():
-            hits = index.get(tuple(row.tolist()), [])
-            if len(hits) == 1:
-                rv[g][hits[0][0]] += 1
-                cvote[c][hits[0][1]] += 1
-        for g, cnt in sorted(rv.items()):
-            (best, n), total = cnt.most_common(1)[0], sum(cnt.values())
-            print(f"ROWMAP,{hyo},{tc},{y},{g},{best},{n},{total}")
-        for c, cnt in sorted(cvote.items()):
-            (best, n), total = cnt.most_common(1)[0], sum(cnt.values())
-            print(f"COLMAP,{hyo},{tc},{y},{c},{best},{n},{total}")
-
-    z = csv[csv["市区町村コード"] == "00000"]
-    for (y, g), gg in z.groupby(["決算年度", "行番号"]):
-        first = gg.sort_values("列番号").iloc[0]
-        print(f"ROWN,{hyo},{y},{g},{first['行名称']},{first['値']}")
-    for (y, c), gg in z.groupby(["決算年度", "列番号"]):
-        print(f"COLN,{hyo},{y},{c},{gg['列名称'].dropna().iloc[0] if gg['列名称'].notna().any() else ''}")
-    # 合計の検算用に全国計の全セル
-    for _, r0 in z.iterrows():
-        print(f"CELL,{hyo},{r0['決算年度']},{r0['行番号']},{r0['列番号']},{r0['値']}")
+for h in ["04", "15", "37", "39"]:
+    r = httpx.get(f"{API}/chizai/items", params={"hyo": h}, timeout=120).json()
+    print(h, "items:", r["count"])
+def show(params, years):
+    r = httpx.get(f"{API}/chizai/data", params=params, timeout=300)
+    j = r.json()
+    print(params, r.status_code, j.get("count"))
+    for x in j.get("data", []):
+        if x["決算年度"] in years:
+            print("  ", x["決算年度"], x["行番号"], x["列番号"], x["行名称"], "|", x["列名称"], "|", x["項目名"], "|", x.get("指標名"), "|", x["値"])
+show({"hyo": "15", "dantai": "20000", "item": "公債費", "shihyo": "決算額"}, (2005, 2006, 2024))
+show({"hyo": "37", "dantai": "00000", "item": "減収補てん債(昭和57・61・平成5~当年度分)|臨時財政対策債", "shihyo": "差引現在高"}, (2017, 2018, 2019, 2020, 2024))
+show({"hyo": "39", "dantai": "00000", "item": "市中銀行", "shihyo": "差引現在高|差引現在高の利率別/0.5%以下"}, (2002, 2003, 2008, 2020, 2021, 2024))
