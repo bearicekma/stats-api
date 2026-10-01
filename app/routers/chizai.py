@@ -45,7 +45,7 @@ def _name_list(text) -> list[str]:
     return [norm_name(t) for t in str(text).split("|") if t.strip()]
 
 
-def _query(path: str, where: list[str], params: list, order: str, limit, fmt: str, label: str, names: list = None):
+def _query(path: str, where: list[str], params: list, order: str, limit, fmt: str, label: str, names: list = None, partial: bool = False):
     # Parquetを DuckDB で絞り込み、JSON または CSV で返す共通処理
     # names: [(列名, 正規化名称リスト)]。表記ゆれ（空白・中黒・名称中の年度）を無視して名称で絞り込む
     tmp_path = None
@@ -61,7 +61,10 @@ def _query(path: str, where: list[str], params: list, order: str, limit, fmt: st
                 continue
             # 名称の種類は少ないので、重複を除いた名称だけPythonで正規化して照合する
             raw = [r[0] for r in con.execute(f"SELECT DISTINCT {col} FROM {src}").fetchall() if r[0] is not None]
-            hit = [r for r in raw if norm_name(r) in targets]
+            if partial:
+                hit = [r for r in raw if any(t in norm_name(r) for t in targets)]
+            else:
+                hit = [r for r in raw if norm_name(r) in targets]
             if not hit:
                 con.close()
                 return {"collection": label, "updated_at": str(datetime.now()), "count": 0, "data": [],
@@ -168,6 +171,7 @@ async def get_data(
     retsu: str = Query(None, description="列番号。カンマ区切りで複数可。例: 001,005"),
     gyo_name: str = Query(None, description="行名称で絞込（完全一致。空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行"),
     retsu_name: str = Query(None, description="列名称で絞込（gyo_name と同じ規則）。例: 実質収支、令和6年度末現在高"),
+    name_match: str = Query("exact", description="gyo_name・retsu_name の照合方法。exact=完全一致（既定）/ partial=部分一致（例: 財政融資資金 で「内訳・財政融資資金」も拾う）"),
     limit: int = Query(None, ge=1, description="取得件数の上限。省略時は全件"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
@@ -181,6 +185,8 @@ async def get_data(
       `?hyo=02&retsu=005&gyo=01&nendo_from=2018&format=csv`
     - 長野県の地方債現在高のうち市中銀行分の推移（行番号が年度で変わっても名称で追える）
       `?hyo=39&dantai=20000&gyo_name=市中銀行&retsu_name=差引現在高`
+    - 「内訳・財政融資資金」と「財政融資資金」のように前後の付け方が違う名称もまとめて取る（部分一致）
+      `?hyo=39&dantai=20000&gyo_name=財政融資資金&name_match=partial`
 
     ### 列
     決算年度 / 団体コード（6桁）/ 市区町村コード（5桁、マスタ `_M_city`・`_M_pref` と結合用）/
@@ -192,7 +198,9 @@ async def get_data(
       長期間をつなぐときは番号ではなく `gyo_name`・`retsu_name`（名称）で絞り込み、
       `/chizai/tables?hyo=..` と `/chizai/meta?hyo=..` で収録年度を確認してください
     - 名称は「令和6年度末現在高」と「平成9年度末現在高」のように年度だけ違うものを同じとみなします。
-      一方「差引現在高」と「末現在高」のような言い換えは別名称です（/chizai/meta の名称一覧で確認）
+      「内訳・財政融資資金」のような前後の付け方の違いは `name_match=partial` で拾えます。
+      部分一致は「財政融資資金・うち旧資金運用部資金」のような下位項目も拾うので、行名称を確認してください。
+      「簡保資金」→「郵政公社資金」のような改名は別名称です（/chizai/meta の名称一覧で確認）
     - 全国計は 団体コード `000000`（市区町村コード `00000`）
     - 金額の単位は原則千円（表により比率等を含む）
     - 表02（決算収支の状況）は様式上、行01=当年度・行02=前年度です。年度をつなぐときは `gyo=01` で絞ってください
@@ -201,6 +209,8 @@ async def get_data(
     err = _check(kubun, hyo)
     if err:
         return err
+    if name_match not in ("exact", "partial"):
+        return JSONResponse(status_code=400, content={"error": "name_match は exact または partial"})
 
     where, params = [], []
     if nendo_from is not None:
@@ -230,4 +240,4 @@ async def get_data(
 
     h = hyo.zfill(2)
     names = [("行名称", _name_list(gyo_name)), ("列名称", _name_list(retsu_name))]
-    return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names)
+    return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"))

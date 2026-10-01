@@ -487,6 +487,7 @@ async def chizai_get(
     retsu: Annotated[Optional[str], Field(description="列番号。カンマ区切り。例: 001,005")] = None,
     gyo_name: Annotated[Optional[str], Field(description="行名称で絞込（空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行")] = None,
     retsu_name: Annotated[Optional[str], Field(description="列名称で絞込（gyo_nameと同じ規則）。例: 実質収支")] = None,
+    name_match: Annotated[Optional[str], Field(description="exact=完全一致（既定）/ partial=部分一致。partialは下位項目（「〜・うち〜」）も拾う")] = None,
     limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
 ) -> str:
     """総務省「地方財政状況調査」都道府県分 調査表の数値を縦持ちで取得する（1989年度〜最新）。
@@ -500,5 +501,5 @@ async def chizai_get(
     return await _get("/chizai/data", {
         "kubun": "pref", "hyo": hyo, "nendo_from": nendo_from, "nendo_to": nendo_to,
         "dantai": dantai, "gyo": gyo, "retsu": retsu, "gyo_name": gyo_name, "retsu_name": retsu_name,
-        "limit": limit, "format": "json",
+        "name_match": name_match, "limit": limit, "format": "json",
     })
