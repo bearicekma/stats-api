@@ -98,7 +98,7 @@ async def trigger_collection(background_tasks: BackgroundTasks, target: str = No
     - `n_roudou` 長野労働局 求人統計（毎月末）
     - `enecho_gasoline` 資源エネルギー庁 ガソリン価格（毎週水曜、GitHub Actions経由）
     - `jma_nagano` 気象庁 長野県天気予報（毎朝6:00 JST）
-    - `hellowork` ハローワーク 長野県新着求人（毎晩 20:00〜20:45 に15分おき）
+    - `hellowork` ハローワーク 長野県新着求人（毎晩 20:00〜21:45 に15分おき・8回）
 
     **URL例:**
     - `/collect` 全ソース一括収集
