@@ -1,63 +1,70 @@
-# 目的：地方財政状況調査（都道府県分）の項目対応表づくりのための調査（読み取りのみ・GCSへの書き込みなし）
-# 内容：指定した表の全国計（団体コード000000）について、行・列の名称がいつ切り替わったかと、
-#       切り替わり前後の値を表示する。出力は公表済みの全国計の集計値と名称だけ
+# 目的：地方財政状況調査 表04（歳入内訳）の項目対応表づくり（読み取りのみ・GCSへの書き込みなし）
+# 内容：e-Stat旧DB（統計表 0003173301、〜2017年度）の項目と、CSV表04の各列を、
+#       同じ年度の「全国＋47都道府県」の値の並びが一致するかで対応づけ、結果をログに出す。
+#       旧DBは stats-api の /estat/pass 経由で取得する（appId不要）。出力は公表済みの集計値と名称・コードだけ
 
 import io
 import os
-import sys
 
+import httpx
 import pandas as pd
 from google.cloud import storage
 
-from app.collectors.chizai import _norm
-
-TABLES = os.environ.get("CHIZAI_TABLES", "04,15,37,39").split(",")
+API = "https://stats-api-709252231118.asia-northeast1.run.app"
+DB_ID = "0003173301"
 bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-pd.set_option("display.width", 250)
-pd.set_option("display.max_colwidth", 60)
 
+# ── 旧DBの項目一覧（階層つき） ──
+meta = httpx.get(f"{API}/estat/meta/{DB_ID}", timeout=300).json()
+for p in meta["parameters"]:
+    if p["parameter"] in ("cdCat01", "cdTab"):
+        for v in p["values"]:
+            print(f"CAT,{p['parameter']},{v['code']},{v.get('level')},{v.get('parent_code')},{v['name']}")
 
-def ranges(years):
-    ys, out, s = sorted(set(years)), [], None
-    for i, y in enumerate(ys):
-        if s is None:
-            s = y
-        if i == len(ys) - 1 or ys[i + 1] != y + 1:
-            out.append(f"{s}" if s == y else f"{s}-{y}")
-            s = None
-    return ",".join(out)
+# ── 旧DBの値（歳入額のみ・全団体・全年度） ──
+r = httpx.get(f"{API}/estat/pass/{DB_ID}", params={"cdTab": "105900", "format": "csv", "with_code": "true"}, timeout=900)
+r.raise_for_status()
+db = pd.read_csv(io.BytesIO(r.content), encoding="utf-8-sig", dtype=str)
+print("DB列:", list(db.columns), len(db))
+cat_col = [c for c in db.columns if c.endswith("_code") and ("歳入" in c or "内訳" in c)][0]
+area_col = [c for c in db.columns if c.endswith("_code") and "団体" in c][0]
+time_col = [c for c in db.columns if c.endswith("_code") and "時間" in c][0]
+db = db[db["値"].notna()]
+db["年度"] = db[time_col].str[:4].astype(int)
+db["値"] = pd.to_numeric(db["値"], errors="coerce").fillna(0).round().astype("int64")
+db["地域"] = db[area_col].str.zfill(5)
 
+# ── CSV表04（行01）の値 ──
+csv = pd.read_parquet(io.BytesIO(bucket.blob("chizai/pref/04/data.parquet").download_as_bytes()))
+print("CSV 行の例:", csv[(csv["団体コード"] == "000000") & (csv["列番号"] == "001")].groupby(["決算年度"]).apply(lambda g: dict(zip(g["行番号"], g["値"]))).tail(3).to_dict())
+c1 = csv[csv["行番号"] == "01"].copy()
+c1["値"] = pd.to_numeric(c1["値"], errors="coerce").fillna(0).round().astype("int64")
+c1["地域"] = c1["市区町村コード"]
 
-for hyo in TABLES:
-    blob = bucket.blob(f"chizai/pref/{hyo}/data.parquet")
-    df = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
-    z = df[df["団体コード"] == "000000"].copy()
-    print(f"\n######## 表{hyo} 全国計 {len(z)}件 年度 {z['決算年度'].min()}-{z['決算年度'].max()}")
-    for kind, no, name, other_no in [("行", "行番号", "行名称", "列番号"), ("列", "列番号", "列名称", "行番号")]:
-        z["キー"] = z[name].map(_norm)
-        print(f"\n==== 表{hyo} {kind}：名称ごとの年度と番号（名称は最新年度の表記）")
-        rows = []
-        for key, g in z.groupby("キー"):
-            g = g.sort_values("決算年度")
-            nums = "; ".join(f"{n}:{ranges(gg['決算年度'])}" for n, gg in g.groupby(no))
-            rows.append((min(g["決算年度"]), g[name].iloc[-1], ranges(g["決算年度"]), nums))
-        for r in sorted(rows):
-            print(f"  {r[1]} | 年度 {r[2]} | 番号 {r[3]}")
-
-        # 名称の切り替わり：Y年度にあってY+1年度にない名称／Y+1年度に初めて出る名称
-        print(f"\n==== 表{hyo} {kind}：名称の切り替わりと前後の値（相手側は先頭の{'列' if kind == '行' else '行'}番号の値）")
-        first_other = sorted(z[other_no].unique())[0]
-        val = z[z[other_no] == first_other].groupby(["決算年度", "キー"])["値"].sum()
-        names = z.drop_duplicates(["キー"], keep="last").set_index("キー")[name]
-        years = sorted(z["決算年度"].unique())
-        by_year = {y: set(z.loc[z["決算年度"] == y, "キー"]) for y in years}
-        for a, b in zip(years, years[1:]):
-            gone, new = by_year[a] - by_year[b], by_year[b] - by_year[a]
-            if not gone and not new:
-                continue
-            print(f"  -- {a}→{b}")
-            for k in sorted(gone):
-                print(f"     消えた: {names[k]} ({a}年度値 {val.get((a, k))})")
-            for k in sorted(new):
-                print(f"     現れた: {names[k]} ({b}年度値 {val.get((b, k))})")
-    sys.stdout.flush()
+areas = sorted(set(db["地域"]) & set(c1["地域"]))
+print("照合に使う地域数:", len(areas))
+for y in sorted(set(db["年度"]) & set(c1["決算年度"])):
+    dv = db[db["年度"] == y].pivot_table(index=cat_col, columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+    cv = c1[c1["決算年度"] == y].pivot_table(index="列番号", columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+    names = c1[c1["決算年度"] == y].drop_duplicates("列番号").set_index("列番号")["列名称"]
+    index = {}
+    for code, row in dv.iterrows():
+        index.setdefault(tuple(row.tolist()), []).append(code)
+    n_one = n_multi = n_none = n_zero = 0
+    for col, row in cv.iterrows():
+        key = tuple(row.tolist())
+        hit = index.get(key, [])
+        if not any(key):
+            n_zero += 1
+            kind = "ZERO"
+        elif len(hit) == 1:
+            n_one += 1
+            kind = "ONE"
+        elif hit:
+            n_multi += 1
+            kind = "MULTI"
+        else:
+            n_none += 1
+            kind = "NONE"
+        print(f"MAP,{y},{col},{kind},{'|'.join(hit)},{names.get(col)},{row.iloc[0]}")
+    print(f"SUM,{y},一意{n_one},複数{n_multi},一致なし{n_none},全ゼロ{n_zero},DB項目数{len(dv)}")
