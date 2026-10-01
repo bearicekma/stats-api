@@ -159,7 +159,7 @@ async def get_tables(
 @router.get("/meta", summary="表の行・列の一覧")
 async def get_meta(
     kubun: str = Query("pref", description="pref=都道府県分"),
-    hyo: str = Query(..., description="表番号。例: 02（決算収支の状況）"),
+    hyo: str = Query(None, description="表番号。例: 02（決算収支の状況）。省略すると表の一覧（/chizai/tables と同じ）を返す"),
     nendo: int = Query(None, description="この決算年度（西暦）に収録がある行・列だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
@@ -171,7 +171,10 @@ async def get_meta(
     1行は「番号 × 項目（名称）」の単位で、その名称としての収録年度を持ちます。
     名称中の年度（「令和6年度」「元年度契約額」など）の違いは同じ項目として扱います。
     特定の年度の様式だけ見たいときは `nendo` を指定してください。
+    `hyo` を省略すると表の一覧を返します（`/chizai/tables` と同じ）。
     """
+    if hyo is None:
+        return await get_tables(kubun=kubun, hyo=None, nendo=nendo, format=format)
     err = _check(kubun, hyo)
     if err:
         return err
