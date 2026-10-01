@@ -1,63 +1,84 @@
-<<<<<<< HEAD
-# 目的：地方財政状況調査（都道府県分）表16（人件費の状況）の様式から、項目番号ごとの見出しを組み立てる材料を出力する（読み取りのみ）
-# 内容：決算年度2020〜2024の様式（Excel）の表16シートについて、セルの文字（数式の結果を含む）と図形の文字を「行,列,文字」で出力する
+# 目的：表53〜59（復旧・復興事業分）・表60〜66（全国防災事業分）が、表07〜13（歳出内訳及び財源内訳）と同じ様式かを確かめる（読み取りのみ）
+# 内容：①年度ごとに行・列の番号と名称を表07〜13と比べ、違いを出力する
+#       ②表07〜13の項目対応表を当てはめ、親＝子の合計などの検算が表07〜13と同じように成り立つかを全団体で確かめる
 
+import collections
 import io
-import re
-import subprocess
-import sys
-import zipfile
-
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "openpyxl"], check=True)
-import httpx
-import openpyxl
-
-URL = "https://www.e-stat.go.jp/stat-search/file-download?statInfId={}&fileKind=0"
-FORMS = {2020: "000032188822", 2021: "000040044816", 2022: "000040171230", 2023: "000040231574", 2024: "000040374254"}
-
-for y, sid in FORMS.items():
-    b = httpx.get(URL.format(sid), timeout=300, follow_redirects=True).content
-    ws = openpyxl.load_workbook(io.BytesIO(b), data_only=True)["16"]
-    for row in ws.iter_rows():
-        for c in row:
-            if c.value is not None and str(c.value).strip():
-                print(f"C,{y},{c.row - 1},{c.column - 1},{' '.join(str(c.value).split())}")
-    z = zipfile.ZipFile(io.BytesIO(b))
-    wb = z.read("xl/workbook.xml").decode("utf-8")
-    rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
-    rid = dict(re.findall(r'<sheet[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb))
-    tgt = {i: t for i, t in re.findall(r'<Relationship[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"', rels)}
-    tgt.update({i: t for t, i in re.findall(r'<Relationship[^>]*Target="([^"]+)"[^>]*Id="([^"]+)"', rels)})
-    sheet = "xl/" + tgt[rid["16"]].split("xl/")[-1].lstrip("/")
-    srels = sheet.replace("worksheets/", "worksheets/_rels/") + ".rels"
-    for d in re.findall(r'Target="([^"]*drawing[^"]*)"', z.read(srels).decode("utf-8")):
-        dx = z.read("xl/drawings/" + d.split("/")[-1]).decode("utf-8")
-        for anc in re.findall(r"<xdr:(?:twoCellAnchor|oneCellAnchor)[\s\S]*?</xdr:(?:twoCellAnchor|oneCellAnchor)>", dx):
-            fr = re.search(r"<xdr:from><xdr:col>(\d+)</xdr:col>[\s\S]*?<xdr:row>(\d+)</xdr:row>", anc)
-            to = re.search(r"<xdr:to><xdr:col>(\d+)</xdr:col>[\s\S]*?<xdr:row>(\d+)</xdr:row>", anc)
-            txt = "".join(re.findall(r"<a:t>([^<]*)</a:t>", anc))
-            if txt.strip() and fr:
-                print(f"T,{y},{fr.group(2)},{fr.group(1)},{to.group(2) if to else fr.group(2)},{to.group(1) if to else fr.group(1)},{' '.join(txt.split())}")
-=======
-# 目的：ハローワーク夜間収集の実行回数を 4回（20:00〜20:45）→ 8回（20:00〜21:45、15分おき）に増やす
-# 内容：Cloud Scheduler のジョブ hellowork-collect のスケジュールを gcloud で更新し、更新後の設定を表示する
-#       （サービスアカウントに Cloud Scheduler の権限がなければ失敗する → その場合は Colab から更新する）
-
 import os
-import subprocess
 
-key = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-run = lambda *args: print(subprocess.run(["gcloud", *args], capture_output=True, text=True).__getattribute__("stdout") or "", end="")
+import pandas as pd
+from google.cloud import storage
 
-subprocess.run(["gcloud", "auth", "activate-service-account", f"--key-file={key}", "--quiet"], check=True, capture_output=True)
-r = subprocess.run(["gcloud", "scheduler", "jobs", "update", "http", "hellowork-collect",
-                    "--project=stats-api-491107", "--location=asia-northeast1",
-                    "--schedule=0,15,30,45 20-21 * * *", "--time-zone=Asia/Tokyo", "--quiet"],
-                   capture_output=True, text=True)
-print("update exit:", r.returncode)
-print((r.stderr or "").strip()[-600:])
-d = subprocess.run(["gcloud", "scheduler", "jobs", "describe", "hellowork-collect", "--project=stats-api-491107",
-                    "--location=asia-northeast1", "--format=value(schedule,timeZone,state,attemptDeadline,retryConfig.retryCount)"],
-                   capture_output=True, text=True)
-print("describe:", d.stdout.strip(), (d.stderr or "").strip()[-300:])
->>>>>>> origin/main
+bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
+items = pd.read_csv("app/data/chizai_items.csv", dtype=str).fillna("")
+
+
+def load(hyo):
+    d = pd.read_parquet(io.BytesIO(bucket.blob(f"chizai/pref/{hyo}/data.parquet").download_as_bytes()))
+    d = d[d["決算年度"] >= 2011].copy()
+    d["値"] = pd.to_numeric(d["値"], errors="coerce").fillna(0)
+    return d
+
+
+def label(d, base):
+    # 表07〜13の対応表（軸=行・列）を年度範囲つきで当てはめる
+    x = items[items["表番号"] == base]
+    r, c = {}, {}
+    for t in x.itertuples():
+        for y in range(max(int(t.決算年度_開始), 2011), int(t.決算年度_終了) + 1):
+            if t.軸 == "行":
+                r[(y, t.行番号)] = (t.項目名, t.項目コード)
+            else:
+                c[(y, t.列番号)] = t.項目名
+    d["行項目"] = [r.get((y, g), ("?", ""))[0] for y, g in zip(d["決算年度"], d["行番号"])]
+    d["行コード"] = [r.get((y, g), ("?", ""))[1] for y, g in zip(d["決算年度"], d["行番号"])]
+    d["列項目"] = [c.get((y, k), "?") for y, k in zip(d["決算年度"], d["列番号"])]
+    return d
+
+
+def checks(d):
+    # 戻り値: {(検算の種類, 親): 合わなかったセル数}
+    bad = collections.Counter()
+    d = d[(d["行項目"] != "（空欄）") & (d["列項目"] != "（空欄）")]
+    s = d.groupby(["決算年度", "団体コード", "行項目", "列項目"])["値"].sum()
+    code = dict(zip(d["行項目"], d["行コード"]))
+    for (y, a), g in s.groupby(level=[0, 1]):
+        m = g.droplevel([0, 1]).unstack(fill_value=0)  # 行項目 × 列項目
+        for axis, names in (("行", list(m.index)), ("列", list(m.columns))):
+            mm = m if axis == "行" else m.T
+            for p in names:
+                kids = [k for k in names if k.startswith(p + "/") and "/" not in k[len(p) + 1:]]
+                if kids:
+                    diff = (mm.loc[kids].sum() - mm.loc[p]).abs() > 2
+                    bad[(axis, p)] += int(diff.sum())
+        if "歳出合計" in m.index:
+            top = [k for k in m.index if "/" not in k and k != "歳出合計" and code.get(k, "").isdigit()]
+            exp = [k for k in top if int(code[k]) < 700]
+            fin = [k for k in top if int(code[k]) >= 700]
+            for nm, ks in (("歳出合計=性質別", exp), ("歳出合計=財源", fin)):
+                bad[("行", nm)] += int(((m.loc[ks].sum() - m.loc["歳出合計"]).abs() > 2).sum())
+    return bad
+
+
+for k in range(7):
+    base = f"{7 + k:02d}"
+    b = label(load(base), base)
+    bb = checks(b)
+    ok = {key for key, n in bb.items() if n == 0}
+    print(f"BASE,{base},検算で常に成り立つもの{len(ok)}/{len(bb)}")
+    for tgt in (f"{53 + k}", f"{60 + k}"):
+        t = load(tgt)
+        for ax, no, nm in (("行", "行番号", "行名称"), ("列", "列番号", "列名称")):
+            for y in sorted(t["決算年度"].unique()):
+                A = set(map(tuple, b[b["決算年度"] == y][[no, nm]].drop_duplicates().fillna("").values))
+                B = set(map(tuple, t[t["決算年度"] == y][[no, nm]].drop_duplicates().fillna("").values))
+                if A != B:
+                    print(f"DIFF,{tgt},{base},{y},{ax},表{base}のみ={sorted(A - B)[:6]},表{tgt}のみ={sorted(B - A)[:6]}")
+        t = label(t, base)
+        unm = t[((t["行項目"] == "?") | (t["列項目"] == "?")) & (t["値"] != 0)]
+        blank = t[((t["行項目"] == "（空欄）") | (t["列項目"] == "（空欄）")) & (t["値"] != 0)]
+        tb = checks(t)
+        ng = {key: n for key, n in tb.items() if key in ok and n}
+        print(f"RES,{tgt},{base},年度{t['決算年度'].min()}-{t['決算年度'].max()},件数{len(t)},対応なし非ゼロ{len(unm)},空欄に値{len(blank)},検算不一致{len(ng)}")
+        for key, n in list(ng.items())[:10]:
+            print(f"NG,{tgt},{key[0]},{key[1]},{n}")
