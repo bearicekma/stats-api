@@ -15,7 +15,7 @@ for name in wb.sheetnames:
     if "04" in name or "４" in name:
         ws = wb[name]
         print(f"===== {name} {ws.max_row}x{ws.max_column}")
-        for row in ws.iter_rows(min_row=1, min_row=36, max_row=min(ws.max_row, 80), min_col=36, max_col=ws.max_column):
+        for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 80), min_col=36, max_col=ws.max_column):
             texts = [f"{c.coordinate}={str(c.value).strip()}" for c in row if c.value not in (None, "")]
             if texts:
                 print(" | ".join(texts)[:600])
