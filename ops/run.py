@@ -1,21 +1,34 @@
-# 目的：地方財政状況調査 表46・47（2011年度〜、歳入内訳の復旧・復興／全国防災分）と表16（人件費）の
-#       折り返し行（行02）に名前を付けるための材料を出力する（読み取りのみ・GCSへの書き込みなし）
-# 内容：表04・46・47・16 の年度・行・列ごとの列名称と、全団体の値（; 区切り）を出力する
+# 目的：地方財政状況調査（都道府県分）の調査表様式（Excel）から、表16・46・47の見出しを読み取る（読み取りのみ・GCSへの書き込みなし）
+# 内容：e-Statの調査表様式ファイルをダウンロードし、表16・46・47のシートの空でないセルを「シート,行,列,文字」で出力する
 
 import io
-import os
+import subprocess
+import sys
 
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "xlrd", "openpyxl"], check=True)
+import httpx
 import pandas as pd
-from google.cloud import storage
 
-bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-for hyo, y0 in [("04", 2011), ("46", 2011), ("47", 2011), ("16", 2016)]:
-    d = pd.read_parquet(io.BytesIO(bucket.blob(f"chizai/pref/{hyo}/data.parquet").download_as_bytes()))
-    d = d[d["決算年度"] >= y0]
-    d["値"] = pd.to_numeric(d["値"], errors="coerce").fillna(0).round().astype("int64")
-    areas = sorted(d["団体コード"].unique())
-    print(f"AREAS,{hyo},{';'.join(areas)}")
-    for (y, g, c), gg in d.groupby(["決算年度", "行番号", "列番号"]):
-        v = gg.set_index("団体コード")["値"].reindex(areas).fillna(0).astype("int64")
-        nm = gg["列名称"].dropna()
-        print(f"V,{hyo},{y},{g},{c},{nm.iloc[0] if len(nm) else ''},{gg['行名称'].iloc[0]},{';'.join(map(str, v.tolist()))}")
+URL = "https://www.e-stat.go.jp/stat-search/file-download?statInfId={}&fileKind=0"
+FILES = {  # 調査年: (01表～22表, 23表～51表)
+    "2012": ("000031398452", "000031398453"),
+    "2019": ("000031756946", "000031756947"),
+    "2021": ("000032091860", "000032091861"),
+    "2025": ("000040374254", "000040374255"),
+}
+for year, ids in FILES.items():
+    for sid in ids:
+        b = httpx.get(URL.format(sid), timeout=120, follow_redirects=True).content
+        try:
+            book = pd.read_excel(io.BytesIO(b), sheet_name=None, header=None, dtype=str)
+        except Exception as e:
+            print(f"ERR,{year},{sid},{e}")
+            continue
+        print(f"BOOK,{year},{sid},{'|'.join(book)}")
+        for sh, df in book.items():
+            if not any(k in sh for k in ("16", "46", "47")):
+                continue
+            for i, row in df.iterrows():
+                for j, v in row.items():
+                    if isinstance(v, str) and v.strip():
+                        print(f"C,{year},{sh},{i},{j},{' '.join(v.split())}")
