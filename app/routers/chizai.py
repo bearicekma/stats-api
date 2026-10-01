@@ -231,7 +231,7 @@ async def get_data(
     （項目対応表のある表は、末尾に 項目コード / 項目名 / 指標名 が付く）
 
     ### 項目対応表
-    年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表04・15・37・39。
+    年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表04・07〜13・15・37・39。
     `item` で指定すると、年度ごとに該当する行・列を自動で選びます。一覧と備考は `/chizai/items`
 
     ### 注意
@@ -313,7 +313,7 @@ async def get_data(
 @router.get("/items", summary="項目対応表")
 async def get_items(
     kubun: str = Query("pref", description="pref=都道府県分"),
-    hyo: str = Query(..., description="表番号。現在の対象: 04・15・37・39"),
+    hyo: str = Query(..., description="表番号。現在の対象: 04・07〜13・15・37・39"),
     detail: bool = Query(False, description="true で年度範囲ごとの行番号・列番号・元の名称まで返す"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
