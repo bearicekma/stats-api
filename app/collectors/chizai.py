@@ -230,14 +230,59 @@ def _group_names(rows: pd.DataFrame, merge_contained: bool) -> list[dict]:
     return sorted(out, key=lambda r: r["決算年度_最初"])
 
 
+def _table_groups(df: pd.DataFrame) -> list[dict]:
+    # 1つの表番号の中で、表名称を「同じ表」の塊にまとめる。次のどちらかなら同じ表とみなす
+    #   (1) 正規化した名称が一致する、または一方が他方に含まれる（省略形）
+    #   (2) 行・列の項目名が半分以上重なる（「その3」→「その2」の繰り上げなど、改名だけのもの）
+    nm = df.groupby(["決算年度", "表名称"], dropna=False).size().reset_index(name="件数")
+    nm["キー"] = nm["表名称"].map(_norm)
+    keys = list(dict.fromkeys(nm["キー"]))
+    parent = {k: k for k in keys}
+
+    def find(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for a in keys:
+        for b in keys:
+            if a != b and len(a) >= 4 and a in b:
+                union(a, b)
+
+    it = df[["表名称", "行名称", "列名称"]].drop_duplicates()
+    it = it.assign(キー=it["表名称"].map(_norm))
+    items = {k: {"行:" + _norm(x) for x in g["行名称"]} | {"列:" + _norm(x) for x in g["列名称"]} for k, g in it.groupby("キー")}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            A, B = items.get(a, set()), items.get(b, set())
+            if A and B and len(A & B) / len(A | B) >= 0.5:
+                union(a, b)
+
+    nm["塊"] = nm["キー"].map(find)
+    out = []
+    for _, g in nm.groupby("塊"):
+        g = g.sort_values("決算年度")
+        named = g[g["表名称"].notna()]
+        latest = named["表名称"].iloc[-1] if len(named) else None
+        lk = _norm(latest)
+        # 表記ゆれ：空白・記号・年度だけの違いは除き、名称ごとに最後に使われた表記を1つずつ出す
+        others = list(dict.fromkeys(named.loc[named["キー"] != lk].drop_duplicates("キー", keep="last")["表名称"]))
+        years = set(g["決算年度"])
+        out.append({"表名称": latest, "決算年度_最初": int(min(years)), "決算年度_最新": int(max(years)), "年度数": len(years),
+                    "件数": int(g["件数"].sum()), "表記ゆれ": " / ".join(others) if others else None})
+    return sorted(out, key=lambda r: r["決算年度_最初"])
+
+
 def _index_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     # 1つの表番号のデータから、表一覧と行・列一覧を作る
     hyo = df["表番号"].iloc[0]
-    t = df.groupby(["決算年度", "表名称"], dropna=False).size().reset_index(name="件数").rename(columns={"表名称": "名称"})
-    tables = _group_names(t, merge_contained=True)
+    tables = _table_groups(df)
     for r in tables:
         r["表番号"] = hyo
-        r["表名称"] = r.pop("名称")
         r["同番号の別表"] = len(tables) > 1
     table = pd.DataFrame(tables, columns=TABLE_COLS)
 
