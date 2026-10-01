@@ -31,6 +31,7 @@ area_col = [c for c in db.columns if c.endswith("_code") and "団体" in c][0]
 time_col = [c for c in db.columns if c.endswith("_code") and "時間" in c][0]
 db = db[db["値"].notna()]
 db["年度"] = db[time_col].str[:4].astype(int)
+print("DB時間軸コード:", sorted(db[time_col].unique()))
 db["値"] = pd.to_numeric(db["値"], errors="coerce").fillna(0).round().astype("int64")
 db["地域"] = db[area_col].str.zfill(5)
 
@@ -43,9 +44,14 @@ c1["地域"] = c1["市区町村コード"]
 
 areas = sorted(set(db["地域"]) & set(c1["地域"]))
 print("照合に使う地域数:", len(areas))
-for y in sorted(set(db["年度"]) & set(c1["決算年度"])):
-    dv = db[db["年度"] == y].pivot_table(index=cat_col, columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+for tc in sorted(db[time_col].unique()):
+    y = int(tc[:4])
+    if y not in set(c1["決算年度"]):
+        continue
+    dv = db[db[time_col] == tc].pivot_table(index=cat_col, columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
     cv = c1[c1["決算年度"] == y].pivot_table(index="列番号", columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+    if y in (2010, 2015):
+        print("DBNAT", tc, {k: int(v) for k, v in dv["00000"].items() if k in ("1690", "1770", "1900", "1000", "1010")})
     names = c1[c1["決算年度"] == y].drop_duplicates("列番号").set_index("列番号")["列名称"]
     index = {}
     for code, row in dv.iterrows():
@@ -66,5 +72,10 @@ for y in sorted(set(db["年度"]) & set(c1["決算年度"])):
         else:
             n_none += 1
             kind = "NONE"
-        print(f"MAP,{y},{col},{kind},{'|'.join(hit)},{names.get(col)},{row.iloc[0]}")
-    print(f"SUM,{y},一意{n_one},複数{n_multi},一致なし{n_none},全ゼロ{n_zero},DB項目数{len(dv)}")
+        print(f"MAP,{tc},{y},{col},{kind},{'|'.join(hit)},{names.get(col)},{row.iloc[0]}")
+    print(f"SUM,{tc},{y},一意{n_one},複数{n_multi},一致なし{n_none},全ゼロ{n_zero},DB項目数{len(dv)}")
+
+# ── 各年度の列の並び（全国計の値つき）：2018年度以降の延長に使う ──
+z = c1[c1["地域"] == "00000"].sort_values(["決算年度", "列番号"])
+for _, r in z.iterrows():
+    print(f"COL,{r['決算年度']},{r['列番号']},{r['列名称']},{r['値']}")
