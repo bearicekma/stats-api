@@ -1,24 +1,30 @@
-# 目的：10月1日の取得件数（約700件）が多い理由を調べる（GCS を読むだけで書き込まない）
-# 内容：9月・10月ファイルの件数、10月分と9月分の求人番号の重複、受付年月日・取得日・求人種別の分布、当日の一覧キャッシュの件数を表示する
+# 目的：10月1日の取りこぼし（障害者求人97件を含む約1,100件）を回収する
+# 内容：収集処理 collect_hellowork() を、1回250件ずつ・合計23分以内で繰り返し実行する（1回ごとに保存されるので途中で止まっても失われない）
+#       当日の一覧キャッシュは障害者求人を先頭に並べ替えて使う（件数の少ない障害者求人を先に取り切るため）
+#       夜間収集（20:00〜20:50）が終わった後に実行すること
 
-import io
-import os
-import re
+import time
 
-import pandas as pd
-from google.cloud import storage
+from app.collectors import hellowork as hw
 
-bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-read = lambda p: pd.read_parquet(io.BytesIO(bucket.blob(p).download_as_bytes()))
-digits = lambda s: re.sub(r"\D", "", str(s))
+hw.TIME_BUDGET = 420          # 1回あたりの時間上限（秒）
+TOTAL_BUDGET   = 23 * 60      # 全体の時間上限（ワークフローの30分制限より手前で止める）
 
-sep, oct_ = read("hellowork/kyujin/202609.parquet"), read("hellowork/kyujin/202610.parquet")
-print(f"9月 {len(sep)}件 / 10月 {len(oct_)}件 / 10月のうち9月にもある求人番号 {oct_['求人番号'].map(digits).isin(set(sep['求人番号'].map(digits))).sum()}件")
-print("9月 取得日別:", sep["取得日"].astype(str).value_counts().sort_index().to_dict())
-print("10月 取得日別:", oct_["取得日"].astype(str).value_counts().sort_index().to_dict())
-print("10月 受付年月日別:", oct_["受付年月日"].astype(str).value_counts().sort_index().to_dict())
-print("10月 求人種別×就業形態:", oct_.groupby(["求人種別", "就業形態"]).size().to_dict())
+# 一覧キャッシュを読むときだけ、障害者求人を先頭に並べ替える
+_orig_read = hw._read_parquet
+def _read_sorted(bucket, path):
+    df = _orig_read(bucket, path)
+    if df is not None and path.startswith(hw.LIST_PREFIX):
+        df = df.sort_values("kind", key=lambda s: s.ne("障害者"), kind="stable")
+    return df
+hw._read_parquet = _read_sorted
 
-for b in sorted(bucket.list_blobs(prefix="hellowork/_list/"), key=lambda b: b.name)[-5:]:
-    l = pd.read_parquet(io.BytesIO(b.download_as_bytes()))
-    print(f"{b.name}: 一覧 {len(l)}件 / 種別 {l['kind'].value_counts().to_dict()}")
+started, total, n = time.monotonic(), 0, 0
+while time.monotonic() - started < TOTAL_BUDGET - hw.TIME_BUDGET:
+    n += 1
+    added = hw.collect_hellowork(max_details=250)
+    total += added
+    print(f"--- {n}回目: {added}件追加（累計 {total}件 / {time.monotonic() - started:.0f}秒）")
+    if added == 0:
+        break
+print(f"完了: 合計 {total}件を追加")
