@@ -206,7 +206,9 @@ META_COLS  = ["表番号", "区分", "番号", "名称", "決算年度_最初", 
 def _norm(name) -> str:
     # 名称の比較用キー：全角半角・空白・区切り記号の違いと、名称中の年度（令和6年度・元年度など）を無視する
     s = unicodedata.normalize("NFKC", "" if name is None or pd.isna(name) else str(name))
+    s = re.sub(r"[~～][^()（）]*?年度分", "~当年度分", s)   # 「平成5〜7・9〜30・令和1〜2年度分」のように毎年延びる対象年度の書き方をそろえる
     s = re.sub(r"(令和|平成|昭和)?(\d+|元)年度", "〇年度", s)
+    s = s.replace("補?", "補てん").replace("補塡", "補てん").replace("債還", "償還")   # 元データの文字化け・誤字
     return re.sub(r"[\s・,，、]", "", s)
 
 

@@ -91,9 +91,16 @@ def _query(path: str, where: list[str], params: list, order: str, limit, fmt: st
         sql = f"SELECT * FROM {src}"
         if items is not None:
             # 項目対応表を（行番号・列番号・年度範囲）で結合し、項目コード・項目名の列を足す
-            con.register("items", items[["行番号", "列番号", "開始", "終了", "項目コード", "項目名"]].rename(columns={"行番号": "x_行", "列番号": "x_列"}))
-            sql = (f"SELECT * FROM (SELECT d.*, x.項目コード, x.項目名 FROM {src} d LEFT JOIN items x "
-                   "ON d.行番号 = x.x_行 AND d.列番号 = x.x_列 AND d.決算年度 BETWEEN x.開始 AND x.終了)")
+            # 軸=セル/行 → 項目（項目コード・項目名）、軸=列 → 指標（指標名）。番号 '*' はすべての行・列に当てはまる
+            cols = ["行番号", "列番号", "開始", "終了", "項目コード", "項目名"]
+            ren = {"行番号": "x_行", "列番号": "x_列"}
+            con.register("xi", items[items["軸"].isin(["セル", "行"])][cols].rename(columns=ren))
+            con.register("xc", items[items["軸"] == "列"][cols].rename(columns=ren))
+            sql = (f"SELECT * FROM (SELECT d.*, x.項目コード, x.項目名, c.項目名 AS 指標名 FROM {src} d "
+                   "LEFT JOIN xi x ON (x.x_行 = '*' OR d.行番号 = x.x_行) AND (x.x_列 = '*' OR d.列番号 = x.x_列) "
+                   "AND d.決算年度 BETWEEN x.開始 AND x.終了 "
+                   "LEFT JOIN xc c ON (c.x_行 = '*' OR d.行番号 = c.x_行) AND d.列番号 = c.x_列 "
+                   "AND d.決算年度 BETWEEN c.開始 AND c.終了)")
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += f" ORDER BY {order}"
@@ -197,6 +204,7 @@ async def get_data(
     gyo_name: str = Query(None, description="行名称で絞込（完全一致。空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行"),
     retsu_name: str = Query(None, description="列名称で絞込（gyo_name と同じ規則）。例: 実質収支、令和6年度末現在高"),
     item: str = Query(None, description="統一項目名または項目コードで絞込（項目対応表のある表のみ）。| 区切りで複数可。年度で番号や名称が変わっても同じ系列を返す。一覧は /chizai/items。例: 地方税、国庫支出金/普通建設事業費支出金"),
+    shihyo: str = Query(None, description="指標名で絞込（行と列の2次元の表で、列の指標を統一したもの。例: 表15の 決算額）。| 区切りで複数可"),
     name_match: str = Query("exact", description="gyo_name・retsu_name の照合方法。exact=完全一致（既定）/ partial=部分一致（例: 財政融資資金 で「内訳・財政融資資金」も拾う）"),
     limit: int = Query(None, ge=1, description="取得件数の上限。省略時は全件"),
     format: str = Query("json", description="json（既定）または csv"),
@@ -220,10 +228,10 @@ async def get_data(
     ### 列
     決算年度 / 団体コード（6桁）/ 市区町村コード（5桁、マスタ `_M_city`・`_M_pref` と結合用）/
     都道府県名 / 団体名 / 団体区分 / 表番号 / 表名称 / 行番号 / 行名称 / 列番号 / 列名称 / 値
-    （項目対応表のある表は、末尾に 項目コード / 項目名 が付く）
+    （項目対応表のある表は、末尾に 項目コード / 項目名 / 指標名 が付く）
 
     ### 項目対応表
-    年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表04。
+    年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表04・07〜13・15・37・39・46・47（2011年度〜）・16（行02のみ、2020年度〜）。
     `item` で指定すると、年度ごとに該当する行・列を自動で選びます。一覧と備考は `/chizai/items`
 
     ### 注意
@@ -240,7 +248,7 @@ async def get_data(
     - 表02（決算収支の状況）は様式上、行01=当年度・行02=前年度です。年度をつなぐときは `gyo=01` で絞ってください
     - `-` や空欄は null
     - 表04・46・47・16（2020年度〜）は様式を複数の行に折り返しており、行02以降の列は行01と別の項目です。
-      CSVに見出しがないため列名称は null で、表04は 項目名 で内容が分かります
+      CSVに見出しがないため列名称は null です。内容は 項目名 で分かります（調査表様式から付けたもの）
     """
     err = _check(kubun, hyo)
     if err:
@@ -281,27 +289,39 @@ async def get_data(
         if items is None:
             return JSONResponse(status_code=400, content={"error": f"表{h}には項目対応表がまだありません。gyo_name・retsu_name を使ってください"})
         targets = [t.strip() for t in item.split("|") if t.strip()]
-        known = set(items["項目名"]) | set(items["項目コード"])
+        it = items[items["軸"].isin(["セル", "行"])]
+        known = set(it["項目名"]) | set(it["項目コード"])
         unknown = [t for t in targets if t not in known]
         if unknown:
             return JSONResponse(status_code=400, content={"error": f"項目がありません: {unknown}", "hint": f"/chizai/items?hyo={h} で確認してください"})
         ph = ",".join("?" * len(targets))
         where.append(f"(項目名 IN ({ph}) OR 項目コード IN ({ph}))")
         params.extend(targets + targets)
+    if shihyo:
+        ms = [t.strip() for t in shihyo.split("|") if t.strip()]
+        known = set(items[items["軸"] == "列"]["項目名"]) if items is not None else set()
+        if not known:
+            return JSONResponse(status_code=400, content={"error": f"表{h}には指標の対応表がありません"})
+        unknown = [t for t in ms if t not in known]
+        if unknown:
+            return JSONResponse(status_code=400, content={"error": f"指標がありません: {unknown}", "hint": f"/chizai/items?hyo={h} の 軸=列 を確認してください"})
+        where.append(f"指標名 IN ({','.join('?' * len(ms))})")
+        params.extend(ms)
     return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"), items=items)
 
 
 @router.get("/items", summary="項目対応表")
 async def get_items(
     kubun: str = Query("pref", description="pref=都道府県分"),
-    hyo: str = Query(..., description="表番号。現在の対象: 04"),
+    hyo: str = Query(..., description="表番号。現在の対象: 04・07〜13・15・16・37・39・46・47"),
     detail: bool = Query(False, description="true で年度範囲ごとの行番号・列番号・元の名称まで返す"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
     """
     `/chizai/data` の `item` に指定できる統一項目の一覧。
 
-    - `項目名` は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）
+    - `軸` は セル（行×列で1項目）／行（行が項目）／列（列が指標）。2次元の表では 項目×指標 で値が決まる
+    - `項目名` は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）。軸=列 の名前は `/chizai/data` の `shihyo` に指定する
     - `備考` に改名・統合・区分変更などの注意を記載
     - `detail=true` で、各項目が年度ごとにどの行番号・列番号・元の名称だったかを返す
     """
@@ -315,13 +335,15 @@ async def get_items(
     if detail:
         out = d.drop(columns=["開始", "終了"]).sort_values(["項目名", "決算年度_開始", "行番号"])
     else:
-        latest = d.sort_values("終了").groupby("項目コード").tail(1).set_index("項目コード")
-        g = d.groupby(["項目コード", "項目名"]).agg(決算年度_最初=("開始", "min"), 決算年度_最新=("終了", "max"),
+        latest = d.sort_values("終了").groupby(["軸", "項目コード"]).tail(1).set_index(["軸", "項目コード"])
+        g = d.groupby(["軸", "項目コード", "項目名"]).agg(決算年度_最初=("開始", "min"), 決算年度_最新=("終了", "max"),
                                                   備考=("備考", lambda x: next((v for v in x if v), ""))).reset_index()
         # 並びは様式の順（各項目が最後に載った年度の行番号・列番号）。廃止された項目もその位置に並ぶ
-        g["行"] = g["項目コード"].map(latest["行番号"])
-        g["列"] = g["項目コード"].map(latest["列番号"])
-        out = g.sort_values(["行", "列", "決算年度_最新"], ascending=[True, True, False]).drop(columns=["行", "列"])
+        keys = list(zip(g["軸"], g["項目コード"]))
+        g["行"] = [latest.loc[k, "行番号"] for k in keys]
+        g["列"] = [latest.loc[k, "列番号"] for k in keys]
+        g["軸順"] = g["軸"].map({"セル": 0, "行": 0, "列": 1})
+        out = g.sort_values(["軸順", "行", "列", "決算年度_最新"], ascending=[True, True, True, False]).drop(columns=["行", "列", "軸順"])
     if format == "csv":
         return Response(content=out.to_csv(index=False).encode("utf-8-sig"), media_type="text/csv; charset=utf-8")
     data = out.to_dict(orient="records")

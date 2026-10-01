@@ -92,7 +92,7 @@ async def run_jma_collection():
 
 
 async def run_hellowork_collection():
-    # ハローワーク 長野県新着求人の定期収集（Cloud Scheduler から夜間に15分おき・複数回）
+    # ハローワーク 長野県新着求人の定期収集（Cloud Scheduler から 20:00〜21:45 に15分おき・8回）
     # 0件は正常（取得済み・休日など）。例外時のみメール通知し、None を返す
     try:
         count = await asyncio.to_thread(collect_hellowork)
