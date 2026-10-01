@@ -1,30 +1,21 @@
-# 目的：10月1日の取りこぼしを回収する（2回目。1回目で611件回収、残り488件）
-# 内容：収集処理 collect_hellowork() を、1回250件ずつ・合計23分以内で繰り返し実行する（1回ごとに保存されるので途中で止まっても失われない）
-#       当日の一覧キャッシュは障害者求人を先頭に並べ替えて使う（件数の少ない障害者求人を先に取り切るため）
-#       夜間収集（20:00〜20:50）が終わった後に実行すること
+# 目的：ハローワーク夜間収集の実行回数を 4回（20:00〜20:45）→ 8回（20:00〜21:45、15分おき）に増やす
+# 内容：Cloud Scheduler のジョブ hellowork-collect のスケジュールを gcloud で更新し、更新後の設定を表示する
+#       （サービスアカウントに Cloud Scheduler の権限がなければ失敗する → その場合は Colab から更新する）
 
-import time
+import os
+import subprocess
 
-from app.collectors import hellowork as hw
+key = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+run = lambda *args: print(subprocess.run(["gcloud", *args], capture_output=True, text=True).__getattribute__("stdout") or "", end="")
 
-hw.TIME_BUDGET = 420          # 1回あたりの時間上限（秒）
-TOTAL_BUDGET   = 23 * 60      # 全体の時間上限（ワークフローの30分制限より手前で止める）
-
-# 一覧キャッシュを読むときだけ、障害者求人を先頭に並べ替える
-_orig_read = hw._read_parquet
-def _read_sorted(bucket, path):
-    df = _orig_read(bucket, path)
-    if df is not None and path.startswith(hw.LIST_PREFIX):
-        df = df.sort_values("kind", key=lambda s: s.ne("障害者"), kind="stable")
-    return df
-hw._read_parquet = _read_sorted
-
-started, total, n = time.monotonic(), 0, 0
-while time.monotonic() - started < TOTAL_BUDGET - hw.TIME_BUDGET:
-    n += 1
-    added = hw.collect_hellowork(max_details=250)
-    total += added
-    print(f"--- {n}回目: {added}件追加（累計 {total}件 / {time.monotonic() - started:.0f}秒）")
-    if added == 0:
-        break
-print(f"完了: 合計 {total}件を追加")
+subprocess.run(["gcloud", "auth", "activate-service-account", f"--key-file={key}", "--quiet"], check=True, capture_output=True)
+r = subprocess.run(["gcloud", "scheduler", "jobs", "update", "http", "hellowork-collect",
+                    "--project=stats-api-491107", "--location=asia-northeast1",
+                    "--schedule=0,15,30,45 20-21 * * *", "--time-zone=Asia/Tokyo", "--quiet"],
+                   capture_output=True, text=True)
+print("update exit:", r.returncode)
+print((r.stderr or "").strip()[-600:])
+d = subprocess.run(["gcloud", "scheduler", "jobs", "describe", "hellowork-collect", "--project=stats-api-491107",
+                    "--location=asia-northeast1", "--format=value(schedule,timeZone,state,attemptDeadline,retryConfig.retryCount)"],
+                   capture_output=True, text=True)
+print("describe:", d.stdout.strip(), (d.stderr or "").strip()[-300:])
