@@ -488,6 +488,7 @@ async def chizai_get(
     gyo_name: Annotated[Optional[str], Field(description="行名称で絞込（空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行")] = None,
     retsu_name: Annotated[Optional[str], Field(description="列名称で絞込（gyo_nameと同じ規則）。例: 実質収支")] = None,
     name_match: Annotated[Optional[str], Field(description="exact=完全一致（既定）/ partial=部分一致。partialは下位項目（「〜・うち〜」）も拾う")] = None,
+    item: Annotated[Optional[str], Field(description="統一項目名または項目コード（項目対応表のある表のみ。現在は表04）。| 区切りで複数可。一覧は chizai_items。例: 地方税")] = None,
     limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
 ) -> str:
     """総務省「地方財政状況調査」都道府県分 調査表の数値を縦持ちで取得する（1989年度〜最新）。
@@ -495,11 +496,25 @@ async def chizai_get(
     番号は chizai_meta で確認する。金額は原則千円。全国計は団体コード 000000。
     表02（決算収支）は行01=当年度・行02=前年度なので、推移を見るときは gyo=01。
     行番号・列番号は様式改正で年度ごとに意味が入れ替わることがあるため、
-    長期間の推移は gyo_name・retsu_name（名称）で絞ること。
+    長期間の推移は、項目対応表のある表（現在は表04）は item で、それ以外は gyo_name・retsu_name で絞ること。
+    表04・46・47・16（2020年度〜）の行02以降は様式の続きで列名称が null（表04は項目名で分かる）。
     応答が大きくなりやすいため、hyo に加えて dantai・列・年度で絞ること。
     """
     return await _get("/chizai/data", {
         "kubun": "pref", "hyo": hyo, "nendo_from": nendo_from, "nendo_to": nendo_to,
         "dantai": dantai, "gyo": gyo, "retsu": retsu, "gyo_name": gyo_name, "retsu_name": retsu_name,
-        "name_match": name_match, "limit": limit, "format": "json",
+        "name_match": name_match, "item": item, "limit": limit, "format": "json",
     })
+
+
+@mcp.tool()
+async def chizai_items(
+    hyo: Annotated[str, Field(description="表番号2桁。現在の対象: 04")],
+    detail: Annotated[Optional[bool], Field(description="true で年度範囲ごとの行番号・列番号・元の名称も返す")] = None,
+) -> str:
+    """地方財政状況調査の項目対応表（統一項目の一覧）を返す。
+
+    chizai_get の item に指定できる項目名・項目コードと、収録年度・備考（改名・統合・区分変更の注意）。
+    項目名は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）。
+    """
+    return await _get("/chizai/items", {"kubun": "pref", "hyo": hyo, "detail": detail})
