@@ -1,84 +1,70 @@
-# 目的：表53〜59（復旧・復興事業分）・表60〜66（全国防災事業分）が、表07〜13（歳出内訳及び財源内訳）と同じ様式かを確かめる（読み取りのみ）
-# 内容：①年度ごとに行・列の番号と名称を表07〜13と比べ、違いを出力する
-#       ②表07〜13の項目対応表を当てはめ、親＝子の合計などの検算が表07〜13と同じように成り立つかを全団体で確かめる
+# 目的：地方財政状況調査（都道府県分）表18・19・25・31・90・91の項目対応表づくりの材料を出力する（読み取りのみ・GCSへの書き込みなし）
+# 内容：e-Stat旧DB（〜2017年度）の各セル（分類コードの組）とCSVの各セル（行番号×列番号）を、団体ごとの値の並びで照合し、
+#       一意に一致したものを出力する。あわせてCSVの行・列の名称と全国計の値、旧DBの分類の名称を出力する
 
 import collections
 import io
 import os
+import sys
 
+import httpx
 import pandas as pd
 from google.cloud import storage
 
+API = "https://stats-api-709252231118.asia-northeast1.run.app"
+TARGETS = [("18", "0003173110"), ("19", "0003173071"), ("25", "0003173053"), ("31", "0003173094"), ("90", "0003173322"), ("91", "0003173111")]
+AREAS = None  # None=全団体
 bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-items = pd.read_csv("app/data/chizai_items.csv", dtype=str).fillna("")
 
+for hyo, dbid in TARGETS:
+    meta = httpx.get(f"{API}/estat/meta/{dbid}", timeout=300).json()
+    dims = []
+    for p in meta["parameters"]:
+        if p["parameter"].startswith("cdCat") or p["parameter"] == "cdTab":
+            dims.append((p["parameter"], p["name"]))
+            for v in p["values"]:
+                print(f"CAT,{hyo},{p['parameter']},{v['code']},{v.get('level')},{v.get('parent_code')},{v['name']}")
+    print(f"DIMS,{hyo},{dbid},{'|'.join(f'{a}:{b}' for a, b in dims)}")
+    params = {"format": "csv", "with_code": "true"}
+    if AREAS:
+        params["cdArea"] = ",".join(AREAS)
+    r = httpx.get(f"{API}/estat/pass/{dbid}", params=params, timeout=1500)
+    r.raise_for_status()
+    db = pd.read_csv(io.BytesIO(r.content), encoding="utf-8-sig", dtype=str)
+    area = [c for c in db.columns if c.endswith("_code") and ("団体" in c or "地域" in c)][0]
+    tcol = [c for c in db.columns if c.endswith("_code") and "時間" in c][0]
+    kcols = [b + "_code" for a, b in dims if b + "_code" in db.columns]
+    db = db[db["値"].notna()]
+    db["値"] = pd.to_numeric(db["値"], errors="coerce").fillna(0).round().astype("int64")
+    db["地域"] = db[area].str.zfill(5)
+    db["key"] = db[kcols].fillna("").agg("|".join, axis=1)
+    print(f"DB,{hyo},{len(db)},{'|'.join(kcols)}")
+    sys.stdout.flush()
 
-def load(hyo):
-    d = pd.read_parquet(io.BytesIO(bucket.blob(f"chizai/pref/{hyo}/data.parquet").download_as_bytes()))
-    d = d[d["決算年度"] >= 2011].copy()
-    d["値"] = pd.to_numeric(d["値"], errors="coerce").fillna(0)
-    return d
-
-
-def label(d, base):
-    # 表07〜13の対応表（軸=行・列）を年度範囲つきで当てはめる
-    x = items[items["表番号"] == base]
-    r, c = {}, {}
-    for t in x.itertuples():
-        for y in range(max(int(t.決算年度_開始), 2011), int(t.決算年度_終了) + 1):
-            if t.軸 == "行":
-                r[(y, t.行番号)] = (t.項目名, t.項目コード)
-            else:
-                c[(y, t.列番号)] = t.項目名
-    d["行項目"] = [r.get((y, g), ("?", ""))[0] for y, g in zip(d["決算年度"], d["行番号"])]
-    d["行コード"] = [r.get((y, g), ("?", ""))[1] for y, g in zip(d["決算年度"], d["行番号"])]
-    d["列項目"] = [c.get((y, k), "?") for y, k in zip(d["決算年度"], d["列番号"])]
-    return d
-
-
-def checks(d):
-    # 戻り値: {(検算の種類, 親): 合わなかったセル数}
-    bad = collections.Counter()
-    d = d[(d["行項目"] != "（空欄）") & (d["列項目"] != "（空欄）")]
-    s = d.groupby(["決算年度", "団体コード", "行項目", "列項目"])["値"].sum()
-    code = dict(zip(d["行項目"], d["行コード"]))
-    for (y, a), g in s.groupby(level=[0, 1]):
-        m = g.droplevel([0, 1]).unstack(fill_value=0)  # 行項目 × 列項目
-        for axis, names in (("行", list(m.index)), ("列", list(m.columns))):
-            mm = m if axis == "行" else m.T
-            for p in names:
-                kids = [k for k in names if k.startswith(p + "/") and "/" not in k[len(p) + 1:]]
-                if kids:
-                    diff = (mm.loc[kids].sum() - mm.loc[p]).abs() > 2
-                    bad[(axis, p)] += int(diff.sum())
-        if "歳出合計" in m.index:
-            top = [k for k in m.index if "/" not in k and k != "歳出合計" and code.get(k, "").isdigit()]
-            exp = [k for k in top if int(code[k]) < 700]
-            fin = [k for k in top if int(code[k]) >= 700]
-            for nm, ks in (("歳出合計=性質別", exp), ("歳出合計=財源", fin)):
-                bad[("行", nm)] += int(((m.loc[ks].sum() - m.loc["歳出合計"]).abs() > 2).sum())
-    return bad
-
-
-for k in range(7):
-    base = f"{7 + k:02d}"
-    b = label(load(base), base)
-    bb = checks(b)
-    ok = {key for key, n in bb.items() if n == 0}
-    print(f"BASE,{base},検算で常に成り立つもの{len(ok)}/{len(bb)}")
-    for tgt in (f"{53 + k}", f"{60 + k}"):
-        t = load(tgt)
-        for ax, no, nm in (("行", "行番号", "行名称"), ("列", "列番号", "列名称")):
-            for y in sorted(t["決算年度"].unique()):
-                A = set(map(tuple, b[b["決算年度"] == y][[no, nm]].drop_duplicates().fillna("").values))
-                B = set(map(tuple, t[t["決算年度"] == y][[no, nm]].drop_duplicates().fillna("").values))
-                if A != B:
-                    print(f"DIFF,{tgt},{base},{y},{ax},表{base}のみ={sorted(A - B)[:6]},表{tgt}のみ={sorted(B - A)[:6]}")
-        t = label(t, base)
-        unm = t[((t["行項目"] == "?") | (t["列項目"] == "?")) & (t["値"] != 0)]
-        blank = t[((t["行項目"] == "（空欄）") | (t["列項目"] == "（空欄）")) & (t["値"] != 0)]
-        tb = checks(t)
-        ng = {key: n for key, n in tb.items() if key in ok and n}
-        print(f"RES,{tgt},{base},年度{t['決算年度'].min()}-{t['決算年度'].max()},件数{len(t)},対応なし非ゼロ{len(unm)},空欄に値{len(blank)},検算不一致{len(ng)}")
-        for key, n in list(ng.items())[:10]:
-            print(f"NG,{tgt},{key[0]},{key[1]},{n}")
+    csv = pd.read_parquet(io.BytesIO(bucket.blob(f"chizai/pref/{hyo}/data.parquet").download_as_bytes()))
+    csv["値"] = pd.to_numeric(csv["値"], errors="coerce").fillna(0).round().astype("int64")
+    areas = sorted(set(db["地域"]) & set(csv["市区町村コード"]))
+    for tc in sorted(db[tcol].unique()):
+        y = int(tc[:4])
+        cy = csv[csv["決算年度"] == y]
+        if cy.empty:
+            continue
+        dv = db[db[tcol] == tc].pivot_table(index="key", columns="地域", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+        idx = collections.defaultdict(list)
+        for key, row in dv.iterrows():
+            t = tuple(row.tolist())
+            if any(t):
+                idx[t].append(key)
+        cv = cy.pivot_table(index=["行番号", "列番号"], columns="市区町村コード", values="値", aggfunc="sum").reindex(columns=areas).fillna(0).astype("int64")
+        for (g, c), row in cv.iterrows():
+            hits = idx.get(tuple(row.tolist()), [])
+            if len(hits) == 1:
+                print(f"MATCH,{hyo},{tc},{y},{g},{c},{hits[0]}")
+    z = csv[csv["市区町村コード"] == "00000"]
+    for (y, g), gg in z.groupby(["決算年度", "行番号"]):
+        print(f"ROWN,{hyo},{y},{g},{gg['行名称'].iloc[0]}")
+    for (y, c), gg in z.groupby(["決算年度", "列番号"]):
+        print(f"COLN,{hyo},{y},{c},{gg['列名称'].dropna().iloc[0] if gg['列名称'].notna().any() else ''}")
+    for r0 in z.itertuples():
+        print(f"CELL,{hyo},{r0.決算年度},{r0.行番号},{r0.列番号},{r0.値}")
+    sys.stdout.flush()
