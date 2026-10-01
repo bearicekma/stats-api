@@ -76,37 +76,61 @@ def _check(kubun: str, hyo: str = None):
 @router.get("/tables", summary="表の一覧")
 async def get_tables(
     kubun: str = Query("pref", description="pref=都道府県分"),
+    hyo: str = Query(None, description="表番号で絞込。例: 46"),
+    nendo: int = Query(None, description="この決算年度（西暦）に収録がある表だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
     """
     地方財政状況調査（調査表）の表番号・表名称・収録年度の一覧。
 
-    `/chizai/data` の `hyo` に指定する表番号はここで確認します。
-    表名称は最新年度のものです（同じ表番号でも年度により名称が変わっている場合があります）。
+    **同じ表番号が、年度によって別の表に使われていることがあります**（例: 表46は
+    1989〜2004年度が「公共用地先行取得の状況」、2011年度以降が「歳入内訳（復旧・復興事業分）」）。
+    このため、1行は「表番号 × 表（内容）」の単位で、その表としての収録年度を持ちます。
+
+    ### 列
+    - `表名称` その表の最新年度の名称
+    - `決算年度_最初` / `決算年度_最新` / `年度数` その名称で収録されている年度。`年度数` が最初〜最新の年数より少なければ途中に欠けがあります
+    - `件数` データ件数
+    - `表記ゆれ` 同じ表とみなした省略形などの別表記（例:「その1 歳入内訳」）。空白・中黒・名称中の年度だけの違いは同じ表として扱い、ここには出しません
+    - `同番号の別表` true なら、同じ表番号に別の表がある。`/chizai/data` で年度を区切って使ってください
     """
-    err = _check(kubun)
+    err = _check(kubun, hyo)
     if err:
         return err
-    return _query(f"{PREFIX}/{kubun}/_tables.parquet", [], [], "表番号", None, format, f"chizai/{kubun}/tables")
+    where, params = [], []
+    if hyo is not None:
+        where.append("表番号 = ?")
+        params.append(hyo.zfill(2))
+    if nendo is not None:
+        where.append("? BETWEEN 決算年度_最初 AND 決算年度_最新")
+        params.append(nendo)
+    return _query(f"{PREFIX}/{kubun}/_tables.parquet", where, params, "表番号, 決算年度_最初", None, format, f"chizai/{kubun}/tables")
 
 
 @router.get("/meta", summary="表の行・列の一覧")
 async def get_meta(
     kubun: str = Query("pref", description="pref=都道府県分"),
     hyo: str = Query(..., description="表番号。例: 02（決算収支の状況）"),
+    nendo: int = Query(None, description="この決算年度（西暦）に収録がある行・列だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
     """
     指定した表の行番号・列番号とその名称、収録年度の一覧。
 
     `/chizai/data` の `gyo`・`retsu` に指定する番号はここで確認します。
-    名称は最新年度のものです。年度によって番号の意味が変わっている行・列は、
-    `決算年度_最初`・`決算年度_最新` を手がかりに確認してください。
+    表の様式改正で、同じ番号が年度によって別の項目を指していることがあるため、
+    1行は「番号 × 項目（名称）」の単位で、その名称としての収録年度を持ちます。
+    名称中の年度（「令和6年度」「元年度契約額」など）の違いは同じ項目として扱います。
+    特定の年度の様式だけ見たいときは `nendo` を指定してください。
     """
     err = _check(kubun, hyo)
     if err:
         return err
-    return _query(f"{PREFIX}/{kubun}/_meta.parquet", ["表番号 = ?"], [hyo.zfill(2)], "区分 DESC, 番号", None, format, f"chizai/{kubun}/{hyo.zfill(2)}/meta")
+    where, params = ["表番号 = ?"], [hyo.zfill(2)]
+    if nendo is not None:
+        where.append("? BETWEEN 決算年度_最初 AND 決算年度_最新")
+        params.append(nendo)
+    return _query(f"{PREFIX}/{kubun}/_meta.parquet", where, params, "区分 DESC, 番号, 決算年度_最初", None, format, f"chizai/{kubun}/{hyo.zfill(2)}/meta")
 
 
 @router.get("/data", summary="調査表データ（縦持ち）")
@@ -136,6 +160,8 @@ async def get_data(
 
     ### 注意
     - 出典はe-Statのファイル提供CSV（1989年度〜）。e-StatのDB（〜2017年度）とはコード体系が異なります
+    - 同じ表番号・行番号・列番号が、年度によって別の表・項目に使われていることがあります。
+      長期間をつなぐ前に `/chizai/tables?hyo=..` と `/chizai/meta?hyo=..` で収録年度を確認してください
     - 全国計は 団体コード `000000`（市区町村コード `00000`）
     - 金額の単位は原則千円（表により比率等を含む）
     - 表02（決算収支の状況）は様式上、行01=当年度・行02=前年度です。年度をつなぐときは `gyo=01` で絞ってください

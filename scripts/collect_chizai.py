@@ -1,5 +1,5 @@
 # 地方財政状況調査 調査表CSV 収集スクリプト（GitHub Actions用）
-# 使い方: python scripts/collect_chizai.py [dryrun|full|update] [pref]
+# 使い方: python scripts/collect_chizai.py [dryrun|full|update|reindex] [pref]
 
 import os
 import sys

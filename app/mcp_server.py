@@ -462,16 +462,19 @@ async def jma_nagano(
 @mcp.tool()
 async def chizai_meta(
     hyo: Annotated[Optional[str], Field(description="表番号2桁。省略時は表の一覧を返す。例: 02")] = None,
+    nendo: Annotated[Optional[int], Field(description="この決算年度に収録があるものだけ返す。例: 2024")] = None,
 ) -> str:
     """地方財政状況調査（都道府県分 調査表）の表一覧、または指定した表の行・列の一覧を返す。
 
-    chizai_get の前に使う。hyo 省略で表番号・表名称・収録年度の一覧、
-    hyo 指定でその表の行番号・列番号と名称の一覧。
+    chizai_get の前に使う。hyo 省略で表の一覧、hyo 指定でその表の行・列の一覧。
+    同じ表番号・行番号・列番号が年度により別の表・項目を指すことがあるため、
+    各行に収録年度（決算年度_最初〜最新・年度数）が付く。表の一覧で 同番号の別表=true のものは、
+    chizai_get で年度を区切って使うこと。
     e-StatのDB（estat_pass）は2017年度で更新停止のため、それ以降はこちらを使う。
     """
     if hyo is None:
-        return await _get("/chizai/tables", {"kubun": "pref"})
-    return await _get("/chizai/meta", {"kubun": "pref", "hyo": hyo})
+        return await _get("/chizai/tables", {"kubun": "pref", "nendo": nendo})
+    return await _get("/chizai/meta", {"kubun": "pref", "hyo": hyo, "nendo": nendo})
 
 
 @mcp.tool()

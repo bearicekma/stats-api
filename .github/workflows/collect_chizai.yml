@@ -11,11 +11,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'dryrun / full / update'
+        description: 'dryrun / full / update / reindex'
         required: true
         default: 'dryrun'
         type: choice
-        options: [dryrun, full, update]
+        options: [dryrun, full, update, reindex]
 
 concurrency:
   group: collect-chizai

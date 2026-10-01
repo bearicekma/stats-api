@@ -17,6 +17,7 @@ import re
 import shutil
 import tempfile
 import time
+import unicodedata
 
 import httpx
 import pandas as pd
@@ -181,33 +182,115 @@ def _save_json(obj: dict, path: str):
 
 
 # ── 索引（表一覧・行列一覧） ───────────────────────────────
+# 同じ表番号・行番号・列番号でも、年度によって別の表・項目に使われていることがある。
+# 名称を正規化して「同じもの」の塊にまとめ、塊ごとに収録年度を持たせる。
+
+TABLE_COLS = ["表番号", "表名称", "決算年度_最初", "決算年度_最新", "年度数", "件数", "表記ゆれ", "同番号の別表"]
+META_COLS  = ["表番号", "区分", "番号", "名称", "決算年度_最初", "決算年度_最新", "年度数", "表記ゆれ"]
+
+
+def _norm(name) -> str:
+    # 名称の比較用キー：全角半角・空白・区切り記号の違いと、名称中の年度（令和6年度・元年度など）を無視する
+    s = unicodedata.normalize("NFKC", "" if name is None or pd.isna(name) else str(name))
+    s = re.sub(r"(令和|平成|昭和)?(\d+|元)年度", "〇年度", s)
+    return re.sub(r"[\s・,，、]", "", s)
+
+
+def _group_names(rows: pd.DataFrame, merge_contained: bool) -> list[dict]:
+    # rows: 決算年度・名称・件数（1つの番号分）。正規化名称ごとにまとめる
+    # merge_contained=True のとき、名称が別の名称に含まれるもの（例:「その1歳入内訳」）も同じ塊にまとめる
+    rows = rows.assign(キー=rows["名称"].map(_norm))
+    groups = {}
+    for key, g in rows.groupby("キー", sort=False):
+        g = g.sort_values("決算年度")
+        groups[key] = {"years": set(g["決算年度"]), "count": int(g["件数"].sum()), "key": key,
+                       "variants": {}, "latest": int(g["決算年度"].max()), "latest_name": g["名称"].iloc[-1]}
+    if merge_contained:
+        for key in sorted(groups, key=len):
+            if key not in groups or len(key) < 4:
+                continue
+            host = [k for k in groups if k != key and key in k]
+            if host:
+                h = groups[max(host, key=len)]
+                g = groups.pop(key)
+                h["years"] |= g["years"]
+                h["count"] += g["count"]
+                h["variants"][g["key"]] = g["latest_name"]
+                h["variants"].update(g["variants"])
+                if g["latest"] > h["latest"]:
+                    h["variants"][h["key"]] = h["latest_name"]
+                    h["latest"], h["latest_name"], h["key"] = g["latest"], g["latest_name"], g["key"]
+                    h["variants"].pop(g["key"], None)
+    out = []
+    for g in groups.values():
+        # 表記ゆれ：省略形など、空白・記号・年度以外が違う表記だけを出す（年度違いまで並べると読めないため）
+        others = list(g["variants"].values())
+        out.append({"名称": g["latest_name"], "決算年度_最初": int(min(g["years"])), "決算年度_最新": int(max(g["years"])),
+                    "年度数": len(g["years"]), "件数": g["count"], "表記ゆれ": " / ".join(others) if others else None})
+    return sorted(out, key=lambda r: r["決算年度_最初"])
+
 
 def _index_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # 1つの表から、表一覧の1行と行・列一覧を作る（名称は最新年度のもの）
-    latest = df.sort_values("決算年度")
-    table = pd.DataFrame([{
-        "表番号": latest["表番号"].iloc[-1],
-        "表名称": latest["表名称"].iloc[-1],
-        "決算年度_最初": int(df["決算年度"].min()),
-        "決算年度_最新": int(df["決算年度"].max()),
-        "件数": len(df),
-    }])
+    # 1つの表番号のデータから、表一覧と行・列一覧を作る
+    hyo = df["表番号"].iloc[0]
+    t = df.groupby(["決算年度", "表名称"], dropna=False).size().reset_index(name="件数").rename(columns={"表名称": "名称"})
+    tables = _group_names(t, merge_contained=True)
+    for r in tables:
+        r["表番号"] = hyo
+        r["表名称"] = r.pop("名称")
+        r["同番号の別表"] = len(tables) > 1
+    table = pd.DataFrame(tables, columns=TABLE_COLS)
+
     parts = []
     for kind, no, name in [("行", "行番号", "行名称"), ("列", "列番号", "列名称")]:
-        g = latest.groupby(no).agg(名称=(name, "last"), 決算年度_最初=("決算年度", "min"), 決算年度_最新=("決算年度", "max")).reset_index()
-        g = g.rename(columns={no: "番号"})
-        g.insert(0, "区分", kind)
-        g.insert(0, "表番号", table["表番号"].iloc[0])
-        parts.append(g)
-    return table, pd.concat(parts, ignore_index=True)
+        u = df.groupby([no, "決算年度", name], dropna=False).size().reset_index(name="件数").rename(columns={name: "名称"})
+        for num, g in u.groupby(no):
+            for r in _group_names(g, merge_contained=False):
+                r.pop("件数")
+                parts.append({"表番号": hyo, "区分": kind, "番号": num, **r})
+    meta = pd.DataFrame(parts, columns=META_COLS)
+    meta[["決算年度_最初", "決算年度_最新", "年度数"]] = meta[["決算年度_最初", "決算年度_最新", "年度数"]].astype("int32")
+    return table, meta
+
+
+def _save_index(kubun: str, tables: list, metas: list):
+    t = pd.concat(tables, ignore_index=True).sort_values(["表番号", "決算年度_最初"]).reset_index(drop=True)
+    m = pd.concat(metas, ignore_index=True).sort_values(["表番号", "区分", "番号", "決算年度_最初"]).reset_index(drop=True)
+    _save_df(t, f"{PREFIX}/{kubun}/_tables.parquet")
+    _save_df(m, f"{PREFIX}/{kubun}/_meta.parquet")
+    return t
+
+
+def reindex(kubun: str) -> int:
+    # 保存済みの表データ（data.parquet）から索引だけを作り直す。CSVの再取得はしない
+    cols = ["決算年度", "表番号", "表名称", "行番号", "行名称", "列番号", "列名称"]
+    paths = sorted(b.name for b in _bucket().client.list_blobs(BUCKET_NAME, prefix=f"{PREFIX}/{kubun}/") if b.name.endswith("/data.parquet"))
+    tables, metas = [], []
+    for p in paths:
+        df = pd.read_parquet(io.BytesIO(_bucket().blob(p).download_as_bytes()), columns=cols)
+        t, m = _index_rows(df)
+        tables.append(t)
+        metas.append(m)
+        print(f"[reindex] {p} 表名称{len(t)}種 行列{len(m)}件", flush=True)
+    t = _save_index(kubun, tables, metas)
+    multi = t[t["同番号の別表"]]
+    print(f"🔀 同じ表番号に別の表があるもの: {multi['表番号'].nunique()}表番号", flush=True)
+    print(multi[["表番号", "決算年度_最初", "決算年度_最新", "年度数", "表名称"]].to_string(index=False), flush=True)
+    yure = t[t["表記ゆれ"].notna()]
+    print(f"📝 表記ゆれをまとめたもの: {len(yure)}件", flush=True)
+    print(yure[["表番号", "表名称", "表記ゆれ"]].to_string(index=False), flush=True)
+    return len(paths)
 
 
 # ── 実行 ───────────────────────────────────────────────────
 
 def run(kubun: str = "pref", mode: str = "dryrun") -> int:
     # mode: dryrun=一覧と1ファイルの整形結果を表示のみ / full=全期間を取り直す / update=更新されたCSVだけ取り込む
-    if mode not in ("dryrun", "full", "update"):
-        raise ValueError(f"mode は dryrun / full / update: {mode}")
+    #       reindex=保存済みデータから表一覧・行列一覧だけ作り直す
+    if mode not in ("dryrun", "full", "update", "reindex"):
+        raise ValueError(f"mode は dryrun / full / update / reindex: {mode}")
+    if mode == "reindex":
+        return reindex(kubun)
 
     items = fetch_catalog(kubun)
     print(f"📋 CSVリソース {len(items)}件 / カタログ {len({it['catalog'] for it in items})}件", flush=True)
@@ -285,8 +368,7 @@ def run(kubun: str = "pref", mode: str = "dryrun") -> int:
             new_tables.append(tables[~tables["表番号"].isin(done)])
         if meta is not None:
             new_meta.append(meta[~meta["表番号"].isin(done)])
-        _save_df(pd.concat(new_tables, ignore_index=True).sort_values("表番号").reset_index(drop=True), f"{PREFIX}/{kubun}/_tables.parquet")
-        _save_df(pd.concat(new_meta, ignore_index=True).sort_values(["表番号", "区分", "番号"]).reset_index(drop=True), f"{PREFIX}/{kubun}/_meta.parquet")
+        _save_index(kubun, new_tables, new_meta)
         _save_json(state, state_path)
     finally:
         shutil.rmtree(work, ignore_errors=True)
