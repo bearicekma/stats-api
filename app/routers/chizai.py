@@ -18,6 +18,23 @@ router = APIRouter(prefix="/chizai", tags=["地方財政状況調査"])
 BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 PREFIX = "chizai"
 KUBUN_LIST = ["pref"]   # 市町村分を取り込んだら "city" を追加
+ITEMS_CSV = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chizai_items.csv")
+_items_cache = None
+
+
+def _items(kubun: str, hyo: str):
+    # 項目対応表（app/data/chizai_items.csv）のうち、指定の表の分を返す。対応表がなければ None
+    # 対応表は「表番号×行番号×列番号×年度範囲 → 項目コード・項目名」。
+    # 年度で番号の意味が変わったり、名前が重複したりしても、項目名で同じ系列を取れるようにする
+    global _items_cache
+    if _items_cache is None:
+        import pandas as pd
+        d = pd.read_csv(ITEMS_CSV, dtype=str, encoding="utf-8").fillna("")
+        d["開始"] = d["決算年度_開始"].astype(int)
+        d["終了"] = d["決算年度_終了"].astype(int)
+        _items_cache = d
+    d = _items_cache[(_items_cache["区分"] == kubun) & (_items_cache["表番号"] == hyo)]
+    return d if len(d) else None
 
 
 def _download(path: str):
@@ -45,7 +62,7 @@ def _name_list(text) -> list[str]:
     return [norm_name(t) for t in str(text).split("|") if t.strip()]
 
 
-def _query(path: str, where: list[str], params: list, order: str, limit, fmt: str, label: str, names: list = None, partial: bool = False):
+def _query(path: str, where: list[str], params: list, order: str, limit, fmt: str, label: str, names: list = None, partial: bool = False, items=None):
     # Parquetを DuckDB で絞り込み、JSON または CSV で返す共通処理
     # names: [(列名, 正規化名称リスト)]。表記ゆれ（空白・中黒・名称中の年度）を無視して名称で絞り込む
     tmp_path = None
@@ -72,6 +89,11 @@ def _query(path: str, where: list[str], params: list, order: str, limit, fmt: st
             where.append(f"{col} IN ({','.join('?' * len(hit))})")
             params.extend(hit)
         sql = f"SELECT * FROM {src}"
+        if items is not None:
+            # 項目対応表を（行番号・列番号・年度範囲）で結合し、項目コード・項目名の列を足す
+            con.register("items", items[["行番号", "列番号", "開始", "終了", "項目コード", "項目名"]].rename(columns={"行番号": "x_行", "列番号": "x_列"}))
+            sql = (f"SELECT * FROM (SELECT d.*, x.項目コード, x.項目名 FROM {src} d LEFT JOIN items x "
+                   "ON d.行番号 = x.x_行 AND d.列番号 = x.x_列 AND d.決算年度 BETWEEN x.開始 AND x.終了)")
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += f" ORDER BY {order}"
@@ -137,7 +159,7 @@ async def get_tables(
 @router.get("/meta", summary="表の行・列の一覧")
 async def get_meta(
     kubun: str = Query("pref", description="pref=都道府県分"),
-    hyo: str = Query(..., description="表番号。例: 02（決算収支の状況）"),
+    hyo: str = Query(None, description="表番号。例: 02（決算収支の状況）。省略すると表の一覧（/chizai/tables と同じ）を返す"),
     nendo: int = Query(None, description="この決算年度（西暦）に収録がある行・列だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
 ):
@@ -149,7 +171,10 @@ async def get_meta(
     1行は「番号 × 項目（名称）」の単位で、その名称としての収録年度を持ちます。
     名称中の年度（「令和6年度」「元年度契約額」など）の違いは同じ項目として扱います。
     特定の年度の様式だけ見たいときは `nendo` を指定してください。
+    `hyo` を省略すると表の一覧を返します（`/chizai/tables` と同じ）。
     """
+    if hyo is None:
+        return await get_tables(kubun=kubun, hyo=None, nendo=nendo, format=format)
     err = _check(kubun, hyo)
     if err:
         return err
@@ -171,6 +196,7 @@ async def get_data(
     retsu: str = Query(None, description="列番号。カンマ区切りで複数可。例: 001,005"),
     gyo_name: str = Query(None, description="行名称で絞込（完全一致。空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行"),
     retsu_name: str = Query(None, description="列名称で絞込（gyo_name と同じ規則）。例: 実質収支、令和6年度末現在高"),
+    item: str = Query(None, description="統一項目名または項目コードで絞込（項目対応表のある表のみ）。| 区切りで複数可。年度で番号や名称が変わっても同じ系列を返す。一覧は /chizai/items。例: 地方税、国庫支出金/普通建設事業費支出金"),
     name_match: str = Query("exact", description="gyo_name・retsu_name の照合方法。exact=完全一致（既定）/ partial=部分一致（例: 財政融資資金 で「内訳・財政融資資金」も拾う）"),
     limit: int = Query(None, ge=1, description="取得件数の上限。省略時は全件"),
     format: str = Query("json", description="json（既定）または csv"),
@@ -188,9 +214,17 @@ async def get_data(
     - 「内訳・財政融資資金」と「財政融資資金」のように前後の付け方が違う名称もまとめて取る（部分一致）
       `?hyo=39&dantai=20000&gyo_name=財政融資資金&name_match=partial`
 
+    - 歳入内訳の地方税の推移（年度で列番号が変わっても1本の系列で取れる。項目対応表のある表のみ）
+      `?hyo=04&dantai=20000&item=地方税`
+
     ### 列
     決算年度 / 団体コード（6桁）/ 市区町村コード（5桁、マスタ `_M_city`・`_M_pref` と結合用）/
     都道府県名 / 団体名 / 団体区分 / 表番号 / 表名称 / 行番号 / 行名称 / 列番号 / 列名称 / 値
+    （項目対応表のある表は、末尾に 項目コード / 項目名 が付く）
+
+    ### 項目対応表
+    年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表04。
+    `item` で指定すると、年度ごとに該当する行・列を自動で選びます。一覧と備考は `/chizai/items`
 
     ### 注意
     - 出典はe-Statのファイル提供CSV（1989年度〜）。e-StatのDB（〜2017年度）とはコード体系が異なります
@@ -205,6 +239,8 @@ async def get_data(
     - 金額の単位は原則千円（表により比率等を含む）
     - 表02（決算収支の状況）は様式上、行01=当年度・行02=前年度です。年度をつなぐときは `gyo=01` で絞ってください
     - `-` や空欄は null
+    - 表04・46・47・16（2020年度〜）は様式を複数の行に折り返しており、行02以降の列は行01と別の項目です。
+      CSVに見出しがないため列名称は null で、表04は 項目名 で内容が分かります
     """
     err = _check(kubun, hyo)
     if err:
@@ -240,4 +276,53 @@ async def get_data(
 
     h = hyo.zfill(2)
     names = [("行名称", _name_list(gyo_name)), ("列名称", _name_list(retsu_name))]
-    return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"))
+    items = _items(kubun, h)
+    if item:
+        if items is None:
+            return JSONResponse(status_code=400, content={"error": f"表{h}には項目対応表がまだありません。gyo_name・retsu_name を使ってください"})
+        targets = [t.strip() for t in item.split("|") if t.strip()]
+        known = set(items["項目名"]) | set(items["項目コード"])
+        unknown = [t for t in targets if t not in known]
+        if unknown:
+            return JSONResponse(status_code=400, content={"error": f"項目がありません: {unknown}", "hint": f"/chizai/items?hyo={h} で確認してください"})
+        ph = ",".join("?" * len(targets))
+        where.append(f"(項目名 IN ({ph}) OR 項目コード IN ({ph}))")
+        params.extend(targets + targets)
+    return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"), items=items)
+
+
+@router.get("/items", summary="項目対応表")
+async def get_items(
+    kubun: str = Query("pref", description="pref=都道府県分"),
+    hyo: str = Query(..., description="表番号。現在の対象: 04"),
+    detail: bool = Query(False, description="true で年度範囲ごとの行番号・列番号・元の名称まで返す"),
+    format: str = Query("json", description="json（既定）または csv"),
+):
+    """
+    `/chizai/data` の `item` に指定できる統一項目の一覧。
+
+    - `項目名` は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）
+    - `備考` に改名・統合・区分変更などの注意を記載
+    - `detail=true` で、各項目が年度ごとにどの行番号・列番号・元の名称だったかを返す
+    """
+    err = _check(kubun, hyo)
+    if err:
+        return err
+    h = hyo.zfill(2)
+    d = _items(kubun, h)
+    if d is None:
+        return JSONResponse(status_code=404, content={"error": f"表{h}の項目対応表はまだありません"})
+    if detail:
+        out = d.drop(columns=["開始", "終了"]).sort_values(["項目名", "決算年度_開始", "行番号"])
+    else:
+        latest = d.sort_values("終了").groupby("項目コード").tail(1).set_index("項目コード")
+        g = d.groupby(["項目コード", "項目名"]).agg(決算年度_最初=("開始", "min"), 決算年度_最新=("終了", "max"),
+                                                  備考=("備考", lambda x: next((v for v in x if v), ""))).reset_index()
+        # 並びは様式の順（各項目が最後に載った年度の行番号・列番号）。廃止された項目もその位置に並ぶ
+        g["行"] = g["項目コード"].map(latest["行番号"])
+        g["列"] = g["項目コード"].map(latest["列番号"])
+        out = g.sort_values(["行", "列", "決算年度_最新"], ascending=[True, True, False]).drop(columns=["行", "列"])
+    if format == "csv":
+        return Response(content=out.to_csv(index=False).encode("utf-8-sig"), media_type="text/csv; charset=utf-8")
+    data = out.to_dict(orient="records")
+    return {"collection": f"chizai/{kubun}/{h}/items", "updated_at": str(datetime.now()), "count": len(data), "data": data}

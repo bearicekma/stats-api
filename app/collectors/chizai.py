@@ -148,7 +148,21 @@ def normalize(raw: bytes) -> pd.DataFrame:
     long["値"]       = pd.to_numeric(v, errors="coerce")
     long["決算年度"] = long["決算年度"].astype("int32")
     long[STR_COLS]   = long[STR_COLS].astype("string")   # 全て空の列もParquetで文字列型にする
-    return long[OUT_COLS]
+    return fix_continuation(long[OUT_COLS])
+
+
+def fix_continuation(long: pd.DataFrame) -> pd.DataFrame:
+    # 用紙の「続きの行」の誤った列名称を消す。
+    # 表04などは1つの様式を複数の行に折り返しており、行02以降は行01と別の項目が並ぶが、
+    # CSVの見出しは行01の項目名しか持たないため、行02以降に行01の列名称が付いてしまう。
+    # 同じ年度・同じ表で、2つ以上の行がすべて同じ行名称（例:「決算額」）なら続きの行とみなし、
+    # 最初の行以外の列名称を null にする（正しい項目名は app/data/chizai_items.csv で付ける）
+    out = long.copy()
+    for (y, hyo), g in out.groupby(["決算年度", "表番号"]):
+        if g["行番号"].nunique() > 1 and g["行名称"].nunique(dropna=False) == 1:
+            first = g["行番号"].min()
+            out.loc[g.index[g["行番号"] != first], "列名称"] = pd.NA
+    return out
 
 
 # ── GCS ────────────────────────────────────────────────────
@@ -294,7 +308,7 @@ def _index_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     parts = []
     for kind, no, name in [("行", "行番号", "行名称"), ("列", "列番号", "列名称")]:
-        u = df.groupby([no, "決算年度", name], dropna=False).size().reset_index(name="件数").rename(columns={name: "名称"})
+        u = df[df[name].notna()].groupby([no, "決算年度", name]).size().reset_index(name="件数").rename(columns={name: "名称"})
         for num, g in u.groupby(no):
             for r in _group_names(g, merge_contained=False):
                 r.pop("件数")
@@ -333,15 +347,38 @@ def reindex(kubun: str) -> int:
     return len(paths)
 
 
+def fix_saved_continuation(kubun: str, write: bool) -> int:
+    # 保存済みの表データに fix_continuation を当てる。write=False なら件数の確認だけ
+    paths = sorted(b.name for b in _bucket().client.list_blobs(BUCKET_NAME, prefix=f"{PREFIX}/{kubun}/") if b.name.endswith("/data.parquet"))
+    changed = 0
+    for p in paths:
+        df = pd.read_parquet(io.BytesIO(_bucket().blob(p).download_as_bytes()))
+        fixed = fix_continuation(df)
+        n = int((df["列名称"].notna() & fixed["列名称"].isna()).sum())
+        if n:
+            yrs = sorted(fixed.loc[df["列名称"].notna() & fixed["列名称"].isna(), "決算年度"].unique().tolist())
+            print(f"[fixcont] {p}: 列名称を消す {n}件 年度 {yrs[0]}-{yrs[-1]}（{len(yrs)}年）", flush=True)
+            changed += 1
+            if write:
+                fixed[STR_COLS] = fixed[STR_COLS].astype("string")
+                _save_df(fixed, p)
+    if write and changed:
+        reindex(kubun)
+    print(f"[fixcont] 対象 {changed}表 / write={write}", flush=True)
+    return changed
+
+
 # ── 実行 ───────────────────────────────────────────────────
 
 def run(kubun: str = "pref", mode: str = "dryrun") -> int:
     # mode: dryrun=一覧と1ファイルの整形結果を表示のみ / full=全期間を取り直す / update=更新されたCSVだけ取り込む
     #       reindex=保存済みデータから表一覧・行列一覧だけ作り直す
-    if mode not in ("dryrun", "full", "update", "reindex"):
-        raise ValueError(f"mode は dryrun / full / update / reindex: {mode}")
+    if mode not in ("dryrun", "full", "update", "reindex", "fixcont_dryrun", "fixcont"):
+        raise ValueError(f"mode は dryrun / full / update / reindex / fixcont_dryrun / fixcont: {mode}")
     if mode == "reindex":
         return reindex(kubun)
+    if mode in ("fixcont_dryrun", "fixcont"):
+        return fix_saved_continuation(kubun, write=(mode == "fixcont"))
 
     items = fetch_catalog(kubun)
     print(f"📋 CSVリソース {len(items)}件 / カタログ {len({it['catalog'] for it in items})}件", flush=True)
