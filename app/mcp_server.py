@@ -488,7 +488,7 @@ async def chizai_get(
     gyo_name: Annotated[Optional[str], Field(description="行名称で絞込（空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行")] = None,
     retsu_name: Annotated[Optional[str], Field(description="列名称で絞込（gyo_nameと同じ規則）。例: 実質収支")] = None,
     name_match: Annotated[Optional[str], Field(description="exact=完全一致（既定）/ partial=部分一致。partialは下位項目（「〜・うち〜」）も拾う")] = None,
-    item: Annotated[Optional[str], Field(description="統一項目名または項目コード（項目対応表のある表のみ。現在は表04・07〜13・15・18・25・31・37・39・90・91・46・47・53〜66（2011年度〜）・16（行02のみ、2020年度〜））。| 区切りで複数可。一覧は chizai_items。例: 地方税")] = None,
+    item: Annotated[Optional[str], Field(description="統一項目名または項目コード（項目対応表のある表のみ。現在は表04・07〜13・15・18・21〜25・31・37・39・90・91・46・47・53〜66（2011年度〜）・16（行02のみ、2020年度〜））。| 区切りで複数可。一覧は chizai_items。例: 地方税")] = None,
     shihyo: Annotated[Optional[str], Field(description="指標名（2次元の表で列の指標を統一したもの。例: 表15の 決算額）。一覧は chizai_items の 軸=列")] = None,
     limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
 ) -> str:
@@ -497,7 +497,7 @@ async def chizai_get(
     番号は chizai_meta で確認する。金額は原則千円。全国計は団体コード 000000。
     表02（決算収支）は行01=当年度・行02=前年度なので、推移を見るときは gyo=01。
     行番号・列番号は様式改正で年度ごとに意味が入れ替わることがあるため、
-    長期間の推移は、項目対応表のある表（現在は表04・07〜13・15・18・25・31・37・39・90・91・46・47・53〜66（2011年度〜）・16（行02のみ、2020年度〜））は item（行の項目）と shihyo（列の指標）で、それ以外は gyo_name・retsu_name で絞ること。
+    長期間の推移は、項目対応表のある表（現在は表04・07〜13・15・18・21〜25・31・37・39・90・91・46・47・53〜66（2011年度〜）・16（行02のみ、2020年度〜））は item（行の項目）と shihyo（列の指標）で、それ以外は gyo_name・retsu_name で絞ること。
     表04・46・47・16（2020年度〜）の行02以降は様式の続きで列名称が null（内容は項目名で分かる）。
     応答が大きくなりやすいため、hyo に加えて dantai・列・年度で絞ること。
     """
@@ -510,7 +510,7 @@ async def chizai_get(
 
 @mcp.tool()
 async def chizai_items(
-    hyo: Annotated[str, Field(description="表番号2桁。現在の対象: 04・07〜13・15・16・18・25・31・37・39・46・47・53〜66・90・91")],
+    hyo: Annotated[str, Field(description="表番号2桁。現在の対象: 04・07〜13・15・16・18・21〜25・31・37・39・46・47・53〜66・90・91")],
     detail: Annotated[Optional[bool], Field(description="true で年度範囲ごとの行番号・列番号・元の名称も返す")] = None,
 ) -> str:
     """地方財政状況調査の項目対応表（統一項目の一覧）を返す。
