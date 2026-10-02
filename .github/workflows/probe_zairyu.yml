@@ -1,0 +1,39 @@
+# 一時ワークフロー: 在留外国人統計テーブルデータ（e-Stat）のファイルを取得して
+# zairyu-probe-files ブランチに置く（構造確認用。確認後にブランチごと削除する）
+name: probe-zairyu
+on:
+  push:
+    branches: [probe/zairyu-files]
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: ファイルを取得
+        run: |
+          mkdir -p out && cd out
+          get() { curl -sSL --fail -m 600 -o "$1" "https://www.e-stat.go.jp/stat-search/file-download?statInfId=$2&fileKind=$3"; echo "$1 $(stat -c %s "$1")"; sleep 3; }
+          get 25-12-t2.xlsx 000040472266 0
+          get 25-06-t2.xlsx 000040379766 0
+          get 24-12-t2.xlsx 000040292373 0
+          get 24-06-t2.xlsx 000040228086 0
+          get 23-12-t2.xlsx 000040186957 0
+          get 25-12-t1.xlsx 000040472265 0
+          get 23-06-t1.xlsx 000040124405 0
+          get 25-12-ex-3.pdf 000040472269 2
+          file *
+      - name: 大きいファイルは分割（GitHubの100MB制限対策）
+        run: |
+          cd out
+          for f in *; do s=$(stat -c %s "$f"); if [ "$s" -gt 90000000 ]; then split -b 90m "$f" "$f.part_"; rm "$f"; fi; done
+          ls -la
+      - name: zairyu-probe-files ブランチに保存
+        run: |
+          cd out
+          git init -q -b zairyu-probe-files
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A && git commit -qm "在留外国人統計テーブルデータ（構造確認用）"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" zairyu-probe-files
