@@ -1,21 +1,36 @@
-# 目的：ハローワーク夜間収集の実行回数を 4回（20:00〜20:45）→ 8回（20:00〜21:45、15分おき）に増やす
-# 内容：Cloud Scheduler のジョブ hellowork-collect のスケジュールを gcloud で更新し、更新後の設定を表示する
-#       （サービスアカウントに Cloud Scheduler の権限がなければ失敗する → その場合は Colab から更新する）
+# 目的：在留外国人統計（市区町村別テーブルデータ t2）の初回取込（full）
+# 内容：app/collectors/zairyu.py の run("full") を実行し、5時点（2023-12〜2025-12）を zairyu/t2/ に保存する
+#       ops.yml には e-Stat の appId がないため、カタログ検索の代わりに e-Stat で確認済みのファイル番号を渡す
+#       （以後の定期更新は collect-zairyu ワークフローが appId 付きでカタログから探す）
+#       Power Pivot の明細を読む pbixray は requirements.txt にないので、ここで入れる
+#       書き込み先は新しいパス（zairyu/）のみ。出力は件数・総数などの集計だけ
 
-import os
 import subprocess
+import sys
 
-key = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-run = lambda *args: print(subprocess.run(["gcloud", *args], capture_output=True, text=True).__getattribute__("stdout") or "", end="")
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pbixray==0.15.5"], check=True)
 
-subprocess.run(["gcloud", "auth", "activate-service-account", f"--key-file={key}", "--quiet"], check=True, capture_output=True)
-r = subprocess.run(["gcloud", "scheduler", "jobs", "update", "http", "hellowork-collect",
-                    "--project=stats-api-491107", "--location=asia-northeast1",
-                    "--schedule=0,15,30,45 20-21 * * *", "--time-zone=Asia/Tokyo", "--quiet"],
-                   capture_output=True, text=True)
-print("update exit:", r.returncode)
-print((r.stderr or "").strip()[-600:])
-d = subprocess.run(["gcloud", "scheduler", "jobs", "describe", "hellowork-collect", "--project=stats-api-491107",
-                    "--location=asia-northeast1", "--format=value(schedule,timeZone,state,attemptDeadline,retryConfig.retryCount)"],
-                   capture_output=True, text=True)
-print("describe:", d.stdout.strip(), (d.stderr or "").strip()[-300:])
+from app.collectors import zairyu as z
+
+FILES = [  # (調査年月, 表番号, statInfId, 更新日) … e-Stat getDataCatalog（statsCode=00250012）で確認
+    ("202312", "23-12-t2", "000040186957", "2025-05-09"),
+    ("202406", "24-06-t2", "000040228086", "2024-12-13"),
+    ("202412", "24-12-t2", "000040292373", "2025-07-28"),
+    ("202506", "25-06-t2", "000040379766", "2025-12-12"),
+    ("202512", "25-12-t2", "000040472266", "2026-07-10"),
+]
+z.fetch_catalog = lambda: [{
+    "period": p, "table": t, "statInfId": s, "modified": m,
+    "name": f"{t}_在留外国人統計テーブルデータ（国籍・地域別　在留資格別　市区町村別）",
+    "url": f"https://www.e-stat.go.jp/stat-search/file-download?&statInfId={s}&fileKind=0",
+} for p, t, s, m in FILES]
+
+n = z.run("full")
+
+periods = z._load_df(z.PERIODS_PATH)
+print(periods.to_string(index=False))
+data = z._load_df(z.DATA_PATH)
+print("時点別 合計:", data.groupby("調査年月")["人数"].sum().to_dict())
+print("地域区分別 行数:", data["地域区分"].value_counts().to_dict())
+print("列:", list(data.columns))
+print("取込時点数:", n)
