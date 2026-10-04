@@ -1,0 +1,86 @@
+# 在留外国人統計 テーブルデータ（市区町村別 t2）の収集ワークフロー
+# - 手動実行: Actions 画面で mode を選ぶ（dryrun=確認のみ / full=全時点取り直し / update=差分）
+# - 定期実行: 毎月15日 06:15 JST に update（6月末分は12月中旬、12月末分は翌年7月中旬ごろの公開を拾う）
+# 公開リポジトリのためログは公開される。appId など秘匿情報は出力しないこと
+
+name: collect-zairyu
+
+on:
+  schedule:
+    - cron: '15 21 14 * *'   # 毎月14日 21:15 UTC = 15日 06:15 JST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dryrun / full / update'
+        required: true
+        default: 'dryrun'
+        type: choice
+        options: [dryrun, full, update]
+
+concurrency:
+  group: collect-zairyu
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 実行ログを zairyu-log ブランチに保存するため
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # pbixray は Power Pivot のデータモデル（2024年12月末以降の明細）を読むため。本番の requirements.txt には入れない
+      # 0.15.5 の不具合を app/collectors/zairyu.py で差し替えているため、版を固定する
+      - name: 依存パッケージをインストール
+        run: pip install httpx pandas pyarrow google-cloud-storage openpyxl pbixray==0.15.5
+
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: 収集スクリプトを実行
+        id: run
+        env:
+          ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
+        run: |
+          set -o pipefail
+          PYTHONUNBUFFERED=1 python scripts/collect_zairyu.py ${{ github.event.inputs.mode || 'update' }} 2>&1 | tee /tmp/zairyu_output.log
+
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
+
+      # chizai と同じ方式。Actionsのログ本体を外部から読めない環境向けに、ブランチへ上書き保存する
+      - name: 実行ログを zairyu-log ブランチに保存
+        if: always()
+        env:
+          STATUS: ${{ steps.run.outcome }}
+          MODE: ${{ github.event.inputs.mode || 'update' }}
+        run: |
+          mkdir -p /tmp/zairyulog && cd /tmp/zairyulog
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "mode: ${MODE}"
+            echo "status: ${STATUS}"
+            echo "finished_at: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+            echo "run_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "----"
+            cat /tmp/zairyu_output.log 2>/dev/null || echo "(出力なし)"
+          } > run.log
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add run.log
+          git commit -q -m "zairyu log: ${MODE} ${STATUS}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" HEAD:zairyu-log

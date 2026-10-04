@@ -519,3 +519,42 @@ async def chizai_items(
     項目名は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）。
     """
     return await _get("/chizai/items", {"kubun": "pref", "hyo": hyo, "detail": detail})
+
+
+# =============================================================================
+# 在留外国人統計（出入国在留管理庁）
+# =============================================================================
+
+@mcp.tool()
+async def zairyu_meta(
+    type: Annotated[Optional[str], Field(description="periods=収録時点の一覧 / kokuseki=国籍・地域（既定）/ shikaku=在留資格 / nenrei5=年齢5歳階級 / seibetsu=性別")] = None,
+) -> str:
+    """在留外国人統計（市区町村別）の収録時点、または zairyu_get に指定できる国籍・地域・在留資格などの一覧を返す。"""
+    if type == "periods":
+        return await _get("/zairyu/periods")
+    return await _get("/zairyu/meta", {"type": type or "kokuseki"})
+
+
+@mcp.tool()
+async def zairyu_get(
+    from_ym: Annotated[Optional[str], Field(description="調査年月の開始 YYYYMM。例: 202412")] = None,
+    to_ym: Annotated[Optional[str], Field(description="調査年月の終了 YYYYMM。例: 202512")] = None,
+    pref: Annotated[Optional[str], Field(description="都道府県コード2桁。カンマ区切り。例: 20（長野県）")] = None,
+    city: Annotated[Optional[str], Field(description="市区町村コード5桁。カンマ区切り。seirei=city なら政令市コード（例: 14100）も可。例: 20202（松本市）")] = None,
+    kokuseki: Annotated[Optional[str], Field(description="国籍・地域の名称 / 3桁コード / 州名（アジア等）。| 区切り。例: ベトナム|フィリピン")] = None,
+    shikaku: Annotated[Optional[str], Field(description="在留資格の名称 または 4桁コード。| 区切り。例: 永住者|特定技能1号")] = None,
+    by: Annotated[Optional[str], Field(description="結果に残す軸。kokuseki / shikaku / nenrei5 / nenrei / seibetsu をカンマ区切り。外した軸は合計。total で市区町村の合計だけ。既定 kokuseki,shikaku")] = None,
+    seirei: Annotated[Optional[str], Field(description="ward=政令市は区ごと（既定）/ city=政令市の区を市にまとめる")] = None,
+    limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
+) -> str:
+    """出入国在留管理庁「在留外国人統計」の市区町村別 在留外国人数（2023年12月末〜、6月末・12月末の年2回）。
+
+    国籍・地域 × 在留資格 × 年齢・性別（年齢・性別は2024年12月末から）を、by で指定した軸に集計して返す。
+    外国人5,000人未満の市町村は年齢・性別が「秘匿」、総数10人以下の市町村は国籍・在留資格も「秘匿」。
+    未定・不詳は市区町村コード 99999。名称・コードは zairyu_meta で確認する。
+    応答が大きくなりやすいため、pref・city・期間で絞り、by の軸は必要なものだけにすること。
+    """
+    return await _get("/zairyu/data", {
+        "from": from_ym, "to": to_ym, "pref": pref, "city": city, "kokuseki": kokuseki, "shikaku": shikaku,
+        "by": by, "seirei": seirei, "limit": limit, "format": "json",
+    })
