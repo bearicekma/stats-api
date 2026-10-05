@@ -14,7 +14,7 @@ from app.collector     import (
     run_jma_collection,
     run_hellowork_collection,
 )
-from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename, ipss, hellowork, chizai, zairyu
+from app.routers import estat, boj, eia, ndl, fred, d_kanko, n_roudou, enecho, jma, edinet, master, kabuka, ocr, transcribe, drive_rename, ipss, hellowork, chizai, zairyu, houjin
 from app.mcp_server import mcp
 import contextlib
 
@@ -52,6 +52,7 @@ app.include_router(ipss.router)
 app.include_router(hellowork.router)
 app.include_router(chizai.router)
 app.include_router(zairyu.router)
+app.include_router(houjin.router)
 
 GUIDE_HTML = Path(__file__).parent / "templates" / "guide.html"
 

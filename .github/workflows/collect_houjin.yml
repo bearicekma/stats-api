@@ -1,0 +1,82 @@
+# 国税庁 法人番号 全件データ（全国・閉鎖法人を含む）の収集ワークフロー
+# - 手動実行: Actions 画面で mode を選ぶ（dryrun=ファイル一覧と鳥取県1ファイルの確認のみ / full=全48ファイル取り直し）
+# - 定期実行: 毎月3日 05:45 JST に full（全件ファイルは月末時点で作成され、翌月1日0時までに公開される）
+# 公開リポジトリのためログは公開される。秘匿情報は出力しないこと
+
+name: collect-houjin
+
+on:
+  schedule:
+    - cron: '45 20 2 * *'   # 毎月2日 20:45 UTC = 3日 05:45 JST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dryrun / full'
+        required: true
+        default: 'dryrun'
+        type: choice
+        options: [dryrun, full]
+
+concurrency:
+  group: collect-houjin
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 実行ログを houjin-log ブランチに保存するため
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python環境をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージをインストール
+        run: pip install httpx pandas pyarrow google-cloud-storage beautifulsoup4
+
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+
+      - name: 収集スクリプトを実行
+        id: run
+        run: |
+          set -o pipefail
+          PYTHONUNBUFFERED=1 python scripts/collect_houjin.py ${{ github.event.inputs.mode || 'full' }} 2>&1 | tee /tmp/houjin_output.log
+
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
+
+      # zairyu・chizai と同じ方式。Actionsのログ本体を外部から読めない環境向けに、ブランチへ上書き保存する
+      - name: 実行ログを houjin-log ブランチに保存
+        if: always()
+        env:
+          STATUS: ${{ steps.run.outcome }}
+          MODE: ${{ github.event.inputs.mode || 'full' }}
+        run: |
+          mkdir -p /tmp/houjinlog && cd /tmp/houjinlog
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "mode: ${MODE}"
+            echo "status: ${STATUS}"
+            echo "finished_at: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+            echo "run_url: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "----"
+            cat /tmp/houjin_output.log 2>/dev/null || echo "(出力なし)"
+          } > run.log
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add run.log
+          git commit -q -m "houjin log: ${MODE} ${STATUS}"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" HEAD:houjin-log
