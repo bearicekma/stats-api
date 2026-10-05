@@ -86,20 +86,19 @@ def _client() -> httpx.Client:
 
 
 def _label_of(row_text: str):
-    # 行の見出し（都道府県名・国外・全国）から都道府県コードを返す。対象外なら None
+    # 行のテキスト（都道府県名・国外・全国）から都道府県コードを返す。対象外なら None
+    # 表の先頭列は地域（東北・関東…、rowspan）なので、行のどこかに都道府県名があるかで判定する
     t = re.sub(r"\s", "", row_text)
     if "全国" in t:
         return None
     if "国外" in t:
         return CODE_KOKUGAI
-    for name, code in PREF_CODE.items():
-        if t.startswith(name):
-            return code
-    return None
+    hits = [code for name, code in PREF_CODE.items() if name in t]
+    return hits[0] if len(hits) == 1 else None
 
 
 def fetch_page(client: httpx.Client):
-    # ページを取得し、トークンと「CSV・Unicode」のファイル一覧 {都道府県コード: ファイル番号} を返す
+    # ページを取得し、トークンと「CSV・Unicode」のファイル一覧 {都道府県コード: [ファイル番号, …]} を返す
     # ほかに、確認用の生の一覧（形式・見出し・番号）も返す
     r = client.get(PAGE_URL)
     r.raise_for_status()
@@ -130,15 +129,15 @@ def fetch_page(client: httpx.Client):
         label = cells[0].get_text(" ", strip=True) if cells else row_text
         listing.append((fmt, label, m.group(1), row_text))
 
-    # CSV・Unicode の行だけを都道府県コードに対応付ける。
+    # CSV・Unicode の行だけを都道府県コードに対応付ける（東京都など1つの都道府県が複数ファイルに分かれることがある）。
     # 形式が見出しで判別できない場合に備え、1行に複数リンク（形式別の列）があるときは列の位置でも判別する
     files = {}
     for fmt, label, no, row_text in listing:
         f = re.sub(r"\s", "", fmt)
         if "Unicode" in f and "CSV" in f.upper():
-            code = _label_of(label)
-            if code and code not in files:
-                files[code] = no
+            code = _label_of(row_text)
+            if code and no not in files.setdefault(code, []):
+                files[code].append(no)
     if len(files) < 48:
         files = _files_by_column(soup) or files
     return token, files, listing
@@ -156,11 +155,11 @@ def _files_by_column(soup: BeautifulSoup) -> dict:
             cells = tr.find_all(["th", "td"])
             if len(cells) <= idx:
                 continue
-            code = _label_of(cells[0].get_text(" ", strip=True))
+            code = _label_of(tr.get_text(" ", strip=True))
             a = cells[idx].find("a", onclick=True)
             m = re.search(r"(\d{3,})", a.get("onclick", "")) if a else None
-            if code and m and code not in files:
-                files[code] = m.group(1)
+            if code and m and m.group(1) not in files.setdefault(code, []):
+                files[code].append(m.group(1))
     return files
 
 
@@ -173,7 +172,8 @@ def download(client: httpx.Client, file_no: str):
         raise ValueError(f"ZIPではありません（file_no={file_no}, content-type={r.headers.get('content-type')}）")
     cd = r.headers.get("content-disposition", "")
     m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", cd)
-    return r.content, (m.group(1) if m else "")
+    fname = re.sub(r"^[^']*'[^']*'", "", m.group(1)) if m else ""   # utf-8'jp'01_hokkaido_all_….zip → 01_hokkaido_all_….zip
+    return r.content, fname
 
 
 # ── 変換 ───────────────────────────────────────────────────
@@ -265,9 +265,12 @@ def run(mode: str = "dryrun") -> int:
         print(f"🔎 トークン: {'あり' if token else 'なし'} / リンク {len(listing)}件 / CSV・Unicode 対応付け {len(files)}件", flush=True)
 
         if mode == "dryrun":
-            print("── ページ上のリンク（形式 | 行の見出し | ファイル番号）先頭60件 ──", flush=True)
-            for fmt, label, no, _ in listing[:60]:
-                print(f"  {fmt[:40]} | {label[:20]} | {no}", flush=True)
+            print("── CSV・Unicode の対応付け（都道府県コード → ファイル番号）──", flush=True)
+            print("  " + ", ".join(f"{c}:{'+'.join(files[c])}" for c in sorted(files)), flush=True)
+            uni = [x for x in listing if "Unicode" in x[0] and "CSV" in x[0].upper()]
+            print(f"── CSV・Unicode のリンク {len(uni)}件（行テキスト | ファイル番号）──", flush=True)
+            for fmt, label, no, row_text in uni:
+                print(f"  {row_text[:40]} | {no}", flush=True)
             missing = [c for c in list(PREF_CODE.values()) + [CODE_KOKUGAI] if c not in files]
             print(f"対応付けできなかった都道府県コード: {missing or 'なし'}", flush=True)
             target = "31" if "31" in files else next(iter(files), None)
@@ -275,7 +278,7 @@ def run(mode: str = "dryrun") -> int:
                 print("⚠️ CSV・Unicode のファイルを特定できませんでした。上の一覧で形式の見出しを確認してください", flush=True)
                 return 0
             time.sleep(FILE_INTERVAL)
-            content, fname = download(client, files[target])
+            content, fname = download(client, files[target][0])
             raw = read_zip(content)
             df = normalize(raw)
             print(f"📦 {fname}（{len(content) / 1e6:.1f}MB）基準日={_base_date(fname)}", flush=True)
@@ -296,9 +299,17 @@ def run(mode: str = "dryrun") -> int:
         workdir = tempfile.mkdtemp()
         summaries, base_dates = [], set()
         for code in need:
-            time.sleep(FILE_INTERVAL)
-            content, fname = download(client, files[code])
-            df = normalize(read_zip(content))
+            parts, fnames = [], []
+            for no in files[code]:
+                time.sleep(FILE_INTERVAL)
+                content, fname = download(client, no)
+                parts.append(read_zip(content))
+                fnames.append(fname)
+                del content
+            df = normalize(pd.concat(parts, ignore_index=True))
+            del parts
+            if df["法人番号"].duplicated().any():
+                raise RuntimeError(f"{code}: 法人番号が重複しています（{int(df['法人番号'].duplicated().sum())}件）")
             if code != CODE_KOKUGAI:
                 other = set(df["都道府県コード"].dropna()) - {code}
                 if other:
@@ -306,11 +317,9 @@ def run(mode: str = "dryrun") -> int:
             df.to_parquet(os.path.join(workdir, f"pref={code}.parquet"), index=False)
             s = _summary(code, df)
             summaries.append(s)
-            bd = _base_date(fname)
-            if bd:
-                base_dates.add(bd)
-            print(f"  ✔ {code} {s['都道府県']}: {s['件数']:,}件（存続 {s['存続']:,} / 閉鎖 {s['閉鎖']:,}）{fname}", flush=True)
-            del df, content
+            base_dates.update(bd for bd in map(_base_date, fnames) if bd)
+            print(f"  ✔ {code} {s['都道府県']}: {s['件数']:,}件（存続 {s['存続']:,} / 閉鎖 {s['閉鎖']:,}）{' + '.join(fnames)}", flush=True)
+            del df
 
         if len(base_dates) > 1:
             raise RuntimeError(f"ファイルの基準日がそろっていません: {sorted(base_dates)}")
