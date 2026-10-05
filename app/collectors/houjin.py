@@ -97,6 +97,21 @@ def _label_of(row_text: str):
     return hits[0] if len(hits) == 1 else None
 
 
+def _link_label(a) -> str:
+    # リンクの直前にある都道府県名（または 全国・国外）を返す。表は1行に地域内の各県が
+    # 「青森県 zip 2MB 岩手県 zip 2MB …」と並ぶため、行ではなくリンクごとに直前の名前を探す。
+    # 東京都のように2ファイルに分かれる場合も、2本目の直前をさかのぼれば「東京都」に当たる
+    names = PREFS + ["全国", "国外"]
+    for i, t in enumerate(a.find_all_previous(string=True)):
+        if i > 12:
+            break
+        t = re.sub(r"\s", "", str(t))
+        hit = next((n for n in names if n in t), None)
+        if hit:
+            return hit
+    return ""
+
+
 def fetch_page(client: httpx.Client):
     # ページを取得し、トークンと「CSV・Unicode」のファイル一覧 {都道府県コード: [ファイル番号, …]} を返す
     # ほかに、確認用の生の一覧（形式・見出し・番号）も返す
@@ -125,8 +140,7 @@ def fetch_page(client: httpx.Client):
             th = table.find("th")
             if th is not None:
                 fmt += " " + th.get_text(" ", strip=True)
-        cells = tr.find_all(["th", "td"]) if tr else []
-        label = cells[0].get_text(" ", strip=True) if cells else row_text
+        label = _link_label(a)
         listing.append((fmt, label, m.group(1), row_text))
 
     # CSV・Unicode の行だけを都道府県コードに対応付ける（東京都など1つの都道府県が複数ファイルに分かれることがある）。
@@ -135,7 +149,7 @@ def fetch_page(client: httpx.Client):
     for fmt, label, no, row_text in listing:
         f = re.sub(r"\s", "", fmt)
         if "Unicode" in f and "CSV" in f.upper():
-            code = _label_of(row_text)
+            code = _label_of(label)
             if code and no not in files.setdefault(code, []):
                 files[code].append(no)
     if len(files) < 48:
@@ -270,7 +284,7 @@ def run(mode: str = "dryrun") -> int:
             uni = [x for x in listing if "Unicode" in x[0] and "CSV" in x[0].upper()]
             print(f"── CSV・Unicode のリンク {len(uni)}件（行テキスト | ファイル番号）──", flush=True)
             for fmt, label, no, row_text in uni:
-                print(f"  {row_text[:40]} | {no}", flush=True)
+                print(f"  {label} | {no}", flush=True)
             missing = [c for c in list(PREF_CODE.values()) + [CODE_KOKUGAI] if c not in files]
             print(f"対応付けできなかった都道府県コード: {missing or 'なし'}", flush=True)
             target = "31" if "31" in files else next(iter(files), None)
