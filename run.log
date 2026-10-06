@@ -1,0 +1,11 @@
+commit: bf7f02164756db4e6db198d78c68f4ad738afc09
+mode: update
+status: success
+finished_at: 2026-10-06 10:40:51 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/37400334064
+----
+🚀 地方財政状況調査 収集開始 mode=update kubun=pref
+[estat] getDataCatalog start=1 status=200 bytes=1739592
+📋 CSVリソース 2318件 / カタログ 36件
+🎯 取込対象 0件（0カタログ）
+✅ 終了: 0表
