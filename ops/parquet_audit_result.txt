@@ -1,0 +1,48 @@
+== バケット全体（拡張子別） ==
+parquet      167 files     417.32 MB
+json          10 files       0.41 MB
+合計           177 files     417.72 MB
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 4718, in _prep_and_do_download
+    self._do_download(
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 1094, in _do_download
+    response = download.consume(transport, timeout=timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/download.py", line 280, in consume
+    return _request_helpers.wait_and_retry(retriable_request, self._retry_strategy)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/_request_helpers.py", line 107, in wait_and_retry
+    return func()
+           ^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 295, in retry_wrapped_func
+    return retry_target(
+           ^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 157, in retry_target
+    next_sleep = _retry_error_helper(
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_base.py", line 215, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 148, in retry_target
+    result = target()
+             ^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/download.py", line 262, in retriable_request
+    self._process_response(result)
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/_download.py", line 230, in _process_response
+    _helpers.require_status_code(
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/_helpers.py", line 100, in require_status_code
+    raise InvalidResponse(
+google.cloud.storage.exceptions.InvalidResponse: ('Request failed with status code', 404, 'Expected one of', <HTTPStatus.OK: 200>, <HTTPStatus.PARTIAL_CONTENT: 206>)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/runner/work/stats-api/stats-api/ops/parquet_audit.py", line 23, in <module>
+    data = b.download_as_bytes()
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 1552, in download_as_bytes
+    self._prep_and_do_download(
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 4732, in _prep_and_do_download
+    _raise_from_invalid_response(exc)
+  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 5240, in _raise_from_invalid_response
+    raise exceptions.from_http_status(response.status_code, message, response=response)
+google.api_core.exceptions.NotFound: 404 GET https://storage.googleapis.com/download/storage/v1/b/stats-api-491107-data/o/hellowork%2Fkyujin%2F202609.parquet?generation=1791436685275906&alt=media: No such object: stats-api-491107-data/hellowork/kyujin/202609.parquet: ('Request failed with status code', 404, 'Expected one of', <HTTPStatus.OK: 200>, <HTTPStatus.PARTIAL_CONTENT: 206>)
