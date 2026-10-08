@@ -328,7 +328,9 @@ def run(mode: str = "dryrun") -> int:
                 other = set(df["都道府県コード"].dropna()) - {code}
                 if other:
                     print(f"  ⚠️ {code}: ほかの都道府県コードが混在 {sorted(other)}", flush=True)
-            df.to_parquet(os.path.join(workdir, f"pref={code}.parquet"), index=False)
+            # ZSTD レベル9で保存（Snappy 比で約4割小さい。読み込み速度はほぼ同じ）
+            df.to_parquet(os.path.join(workdir, f"pref={code}.parquet"), index=False,
+                          compression="zstd", compression_level=9)
             s = _summary(code, df)
             summaries.append(s)
             base_dates.update(bd for bd in map(_base_date, fnames) if bd)
