@@ -131,13 +131,17 @@ def build_hw_master(client: httpx.Client | None = None) -> pd.DataFrame:
     df["dai_code"] = df["chu_code"].map(lambda c: chu.get(c, (None, None))[1])
     df["dai_name"] = df["dai_code"].map(dai)
 
-    # 対応表（中分類 → 日本標準職業分類の中分類）。まだ無ければ空のまま
+    # 対応表（→ 日本標準職業分類の中分類）。hw_code が小分類（NNN-NN）の行を優先し、なければ中分類（3桁）の行を使う
+    df["jsco_chu_code"] = None
+    df["jsco_chu_name"] = None
     if os.path.exists(CROSSWALK):
-        cw = pd.read_csv(CROSSWALK, dtype=str)
-        df = df.merge(cw[["hw_chu_code", "jsco_chu_code", "jsco_chu_name"]], left_on="chu_code", right_on="hw_chu_code", how="left").drop(columns="hw_chu_code")
-    else:
-        df["jsco_chu_code"] = None
-        df["jsco_chu_name"] = None
+        cw = pd.read_csv(CROSSWALK, dtype=str).set_index("hw_code")
+        key = df["code"].where(df["code"].isin(cw.index), df["chu_code"])
+        df["jsco_chu_code"] = key.map(cw["jsco_chu_code"])
+        df["jsco_chu_name"] = key.map(cw["jsco_chu_name"])
+        unknown = sorted(set(cw.index) - set(df["code"]) - set(df["chu_code"]))
+        if unknown:
+            print(f"対応表にあってマスタにないコード: {unknown}")
 
     problems = []
     if (len(dai), len(chu), len(df)) != (15, 99, 439):
