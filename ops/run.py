@@ -1,5 +1,5 @@
-# 目的：職業分類マスタ（_M_shokugyo / _M_shokugyo_hw）の dry run（3回目・GCSへの書き込みなし）
-# 内容：対応表 app/data/shokugyo_hw_jsco.csv を付けた _M_shokugyo_hw を組み立て、
+# 目的：職業分類マスタ（_M_shokugyo / _M_shokugyo_hw）を GCS に保存する（対応表は確認済み）
+# 内容：対応表 app/data/shokugyo_hw_jsco.csv を付けた _M_shokugyo_hw と _M_shokugyo を組み立てて保存し、
 #       対応先の中分類コード・名称が _M_shokugyo と一致しているか、対応のない小分類がないかを確認する
 
 import pandas as pd
@@ -8,7 +8,7 @@ from app.collectors import shokugyo as sk
 
 pd.set_option("display.width", 200)
 
-DRY_RUN = True
+DRY_RUN = False
 
 j = sk.save_jsco_master(dry_run=DRY_RUN)
 h = sk.save_hw_master(dry_run=DRY_RUN)
