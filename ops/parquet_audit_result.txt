@@ -1,48 +1,181 @@
 == バケット全体（拡張子別） ==
 parquet      167 files     417.32 MB
 json          10 files       0.41 MB
-合計           177 files     417.72 MB
-Traceback (most recent call last):
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 4718, in _prep_and_do_download
-    self._do_download(
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 1094, in _do_download
-    response = download.consume(transport, timeout=timeout)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/download.py", line 280, in consume
-    return _request_helpers.wait_and_retry(retriable_request, self._retry_strategy)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/_request_helpers.py", line 107, in wait_and_retry
-    return func()
-           ^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 295, in retry_wrapped_func
-    return retry_target(
-           ^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 157, in retry_target
-    next_sleep = _retry_error_helper(
-                 ^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_base.py", line 215, in _retry_error_helper
-    raise final_exc from source_exc
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 148, in retry_target
-    result = target()
-             ^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/requests/download.py", line 262, in retriable_request
-    self._process_response(result)
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/_download.py", line 230, in _process_response
-    _helpers.require_status_code(
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/_media/_helpers.py", line 100, in require_status_code
-    raise InvalidResponse(
-google.cloud.storage.exceptions.InvalidResponse: ('Request failed with status code', 404, 'Expected one of', <HTTPStatus.OK: 200>, <HTTPStatus.PARTIAL_CONTENT: 206>)
+合計           177 files     417.73 MB
 
-During handling of the above exception, another exception occurred:
+== Parquet一覧（サイズ順） ==
+      MB    zstd3    zstd9      非圧縮      rows   rg cols  codec        path
+   76.54    52.94    44.00   176.58   1369547    2   25  SNAPPY       houjin/zenken/pref=13.parquet
+   26.81    18.51    15.63    59.49    487622    1   25  SNAPPY       houjin/zenken/pref=27.parquet
+   20.57    14.22    12.00    44.95    376698    1   25  SNAPPY       houjin/zenken/pref=14.parquet
+   16.42    11.51     9.69    34.87    288839    1   25  SNAPPY       houjin/zenken/pref=23.parquet
+   14.42    10.04     8.52    31.49    269073    1   25  SNAPPY       houjin/zenken/pref=11.parquet
+   12.81     8.92     7.48    28.48    235513    1   25  SNAPPY       houjin/zenken/pref=01.parquet
+   12.71    10.05     9.52    16.01   3628888    4   21  SNAPPY       zairyu/t2/data.parquet
+   12.59     8.75     7.41    27.22    235040    1   25  SNAPPY       houjin/zenken/pref=12.parquet
+   12.14     8.48     7.16    26.36    219053    1   25  SNAPPY       houjin/zenken/pref=40.parquet
+   11.48     8.00     6.75    24.67    205980    1   25  SNAPPY       houjin/zenken/pref=28.parquet
+    7.21     5.08     4.20    14.66    115795    1   25  SNAPPY       houjin/zenken/pref=26.parquet
+    6.99     4.97     4.19    15.01    129493    1   25  SNAPPY       houjin/zenken/pref=22.parquet
+    6.14     4.31     3.65    13.36    113791    1   25  SNAPPY       houjin/zenken/pref=34.parquet
+    5.38     3.81     3.23    11.34     97436    1   25  SNAPPY       houjin/zenken/pref=08.parquet
+    4.83     3.45     2.89    10.18     83356    1   25  SNAPPY       houjin/zenken/pref=04.parquet
+    4.55     3.26     2.76     9.64     81766    1   25  SNAPPY       houjin/zenken/pref=20.parquet
+    4.27     3.05     2.59     8.95     76954    1   25  SNAPPY       houjin/zenken/pref=15.parquet
+    4.25     3.03     2.57     9.09     78262    1   25  SNAPPY       houjin/zenken/pref=10.parquet
+    4.23     3.01     2.52     8.79     73275    1   25  SNAPPY       houjin/zenken/pref=07.parquet
+    4.20     3.01     2.55     8.77     74706    1   25  SNAPPY       houjin/zenken/pref=21.parquet
+    4.18     2.97     2.53     8.73     74923    1   25  SNAPPY       houjin/zenken/pref=33.parquet
+    4.11     2.93     2.49     8.76     76503    1   25  SNAPPY       houjin/zenken/pref=09.parquet
+    4.04     2.89     2.45     8.49     72125    1   25  SNAPPY       houjin/zenken/pref=43.parquet
+    3.90     2.81     2.61     9.75   1192320    2   13  SNAPPY       chizai/pref/09/data.parquet
+    3.87     2.76     2.34     8.14     65324    1   25  SNAPPY       houjin/zenken/pref=47.parquet
+    3.60     2.57     2.49     9.57   1195488    2   13  SNAPPY       chizai/pref/37/data.parquet
+    3.58     2.46     2.36     7.80    807984    1   13  SNAPPY       chizai/pref/40/data.parquet
+    3.36     2.40     2.04     7.09     59799    1   25  SNAPPY       houjin/zenken/pref=46.parquet
+    3.36     2.40     2.23     8.60   1016064    1   13  SNAPPY       chizai/pref/08/data.parquet
+    3.29     2.37     2.01     6.76     57088    1   25  SNAPPY       houjin/zenken/pref=24.parquet
+    3.10     2.09     1.65     7.54     20228    1   25  SNAPPY       houjin/zenken/pref=99.parquet
+    3.07     2.20     2.08     8.06    984960    1   13  SNAPPY       chizai/pref/13/data.parquet
+    3.01     2.14     2.01     8.17   1010880    1   13  SNAPPY       chizai/pref/10/data.parquet
+    2.93     2.10     1.78     6.15     53353    1   25  SNAPPY       houjin/zenken/pref=38.parquet
+    2.86     2.86     2.32     8.71      4235    1  187  ZSTD         hellowork/kyujin/202610.parquet
+    2.75     1.97     1.81     8.08   1018656    1   13  SNAPPY       chizai/pref/21/data.parquet
+    2.70     1.94     1.64     5.67     48429    1   25  SNAPPY       houjin/zenken/pref=44.parquet
+    2.56     1.87     1.58     5.24     44964    1   25  SNAPPY       houjin/zenken/pref=17.parquet
+    2.54     1.84     1.57     5.20     44241    1   25  SNAPPY       houjin/zenken/pref=25.parquet
+    2.45     1.78     1.51     5.14     43293    1   25  SNAPPY       houjin/zenken/pref=35.parquet
+    2.40     1.74     1.49     4.91     41626    1   25  SNAPPY       houjin/zenken/pref=29.parquet
+    2.40     1.75     1.48     4.96     42766    1   25  SNAPPY       houjin/zenken/pref=42.parquet
+    2.39     1.67     1.65     7.69    912576    1   13  SNAPPY       chizai/pref/39/data.parquet
+    2.34     1.69     1.58     6.47    832032    1   13  SNAPPY       chizai/pref/23/data.parquet
+    2.30     1.66     1.41     4.81     39871    1   25  SNAPPY       houjin/zenken/pref=45.parquet
+    2.26     1.64     1.53     5.85    798336    1   13  SNAPPY       chizai/pref/11/data.parquet
+    2.24     1.62     1.37     4.71     38669    1   25  SNAPPY       houjin/zenken/pref=02.parquet
+    2.24     1.63     1.39     4.72     40320    1   25  SNAPPY       houjin/zenken/pref=37.parquet
+    2.19     1.60     1.50     5.48    690816    1   13  SNAPPY       chizai/pref/90/data.parquet
+    2.11     1.53     1.42     5.65    798336    1   13  SNAPPY       chizai/pref/07/data.parquet
+    2.10     1.53     1.31     4.25     36973    1   25  SNAPPY       houjin/zenken/pref=16.parquet
+    2.07     1.50     1.27     4.25     34522    1   25  SNAPPY       houjin/zenken/pref=03.parquet
+    2.01     1.45     1.38     5.16    635136    1   13  SNAPPY       chizai/pref/06/data.parquet
+    2.00     1.46     1.23     4.07     34288    1   25  SNAPPY       houjin/zenken/pref=06.parquet
+    1.99     1.46     1.24     4.11     36029    1   25  SNAPPY       houjin/zenken/pref=19.parquet
+    1.84     1.34     1.14     3.76     31460    1   25  SNAPPY       houjin/zenken/pref=18.parquet
+    1.83     1.33     1.11     3.71     31067    1   25  SNAPPY       houjin/zenken/pref=05.parquet
+    1.80     1.31     1.09     3.69     31276    1   25  SNAPPY       houjin/zenken/pref=36.parquet
+    1.79     1.32     1.12     3.65     31656    1   25  SNAPPY       houjin/zenken/pref=30.parquet
+    1.79     1.48     1.46     3.39    744240    1   12  SNAPPY       ipss/shorai_jinko/2023/data.parquet
+    1.78     1.47     1.45     3.38    743820    1   12  SNAPPY       ipss/shorai_jinko/2023/data_backup.parquet
+    1.51     1.19     1.08     3.04    655392    1   13  SNAPPY       chizai/pref/41/data.parquet
+    1.48     1.08     0.91     3.07     25279    1   25  SNAPPY       houjin/zenken/pref=41.parquet
+    1.47     1.08     0.91     3.00     26246    1   25  SNAPPY       houjin/zenken/pref=39.parquet
+    1.43     0.98     0.93     5.76   2537280    3   13  SNAPPY       chizai/pref/12/data.parquet
+    1.38     1.10     1.03     2.27    254592    1   13  SNAPPY       chizai/pref/36/data.parquet
+    1.32     0.97     0.82     2.72     23205    1   25  SNAPPY       houjin/zenken/pref=32.parquet
+    1.28     1.00     0.95     2.31    381984    1   13  SNAPPY       chizai/pref/51/data.parquet
+    1.26     0.94     0.91     2.21    268416    1   13  SNAPPY       chizai/pref/05/data.parquet
+    1.20     1.20     1.02     2.96      1286    1  190  ZSTD         hellowork/kyujin/202609.parquet
+    1.19     0.91     0.87     2.08    267840    1   13  SNAPPY       chizai/pref/50/data.parquet
+    1.18     0.92     0.87     2.30    498096    1   13  SNAPPY       chizai/pref/86/data.parquet
+    1.15     0.85     0.72     2.35     20258    1   25  SNAPPY       houjin/zenken/pref=31.parquet
+    1.10     0.90     0.82     1.68    261216    1   13  SNAPPY       chizai/pref/04/data.parquet
+    1.10     0.82     0.82     1.81    191760    1   13  SNAPPY       chizai/pref/15/data.parquet
+    1.08     0.84     0.80     1.73    183744    1   13  SNAPPY       chizai/pref/18/data.parquet
+    1.05     0.83     0.79     1.90    311040    1   13  SNAPPY       chizai/pref/34/data.parquet
+    0.98     0.72     0.69     1.26    126405    1    7  SNAPPY       d_kanko/d_kanko.parquet
+    0.94     0.71     0.68     1.99    498096    1   13  SNAPPY       chizai/pref/84/data.parquet
+    0.87     0.62     0.57     2.24    457920    1   13  SNAPPY       chizai/pref/24/data.parquet
+    0.86     0.65     0.61     1.89    498096    1   13  SNAPPY       chizai/pref/85/data.parquet
+    0.80     0.58     0.53     2.43    641088    1   13  SNAPPY       chizai/pref/22/data.parquet
+    0.78     0.64     0.59     1.15    118704    1   13  SNAPPY       chizai/pref/16/data.parquet
+    0.75     0.56     0.55     1.28    215424    1   13  SNAPPY       chizai/pref/03/data.parquet
+    0.75     0.50     0.44     2.55    641088    1   13  SNAPPY       chizai/pref/20/data.parquet
+    0.73     0.53     0.50     1.78    362880    1   13  SNAPPY       chizai/pref/25/data.parquet
+    0.65     0.50     0.48     1.13    186624    1   13  SNAPPY       chizai/pref/45/data.parquet
+    0.60     0.51     0.50     0.81    276765    1    5  SNAPPY       enecho/gasoline/data.parquet
+    0.57     0.45     0.41     0.96    161568    1   13  SNAPPY       chizai/pref/91/data.parquet
+    0.53     0.41     0.37     1.05    219552    1   13  SNAPPY       chizai/pref/80/data.parquet
+    0.53     0.42     0.38     0.89    132960    1   13  SNAPPY       chizai/pref/19/data.parquet
+    0.47     0.36     0.34     0.86    140112    1   13  SNAPPY       chizai/pref/31/data.parquet
+    0.46     0.34     0.32     1.39    546336    1   13  SNAPPY       chizai/pref/53/data.parquet
+    0.45     0.33     0.31     1.38    595200    1   13  SNAPPY       chizai/pref/30/data.parquet
+    0.39     0.27     0.26     1.41    513504    1   13  SNAPPY       chizai/pref/70/data.parquet
+    0.38     0.32     0.29     0.65    112560    1   13  SNAPPY       chizai/pref/38/data.parquet
+    0.33     0.24     0.22     0.95    376320    1   13  SNAPPY       chizai/pref/59/data.parquet
+    0.32     0.20     0.19     2.65   1512000    2   13  SNAPPY       chizai/pref/58/data.parquet
+    0.32     0.23     0.22     0.84    303360    1   13  SNAPPY       chizai/pref/29/data.parquet
+    0.30     0.23     0.22     0.71    149040    1   13  SNAPPY       chizai/pref/33/data.parquet
+    0.29     0.23     0.22     0.57    137760    1   13  SNAPPY       chizai/pref/87/data.parquet
+    0.27     0.20     0.19     0.91    453600    1   13  SNAPPY       chizai/pref/55/data.parquet
+    0.25     0.14     0.14     2.53   1512000    2   13  SNAPPY       chizai/pref/65/data.parquet
+    0.23     0.11     0.11     0.66     36890    1   11  SNAPPY       master/_M_calendar/data.parquet
+    0.23     0.17     0.16     0.45     77616    1   13  SNAPPY       chizai/pref/27/data.parquet
+    0.22     0.15     0.15     0.78    395136    1   13  SNAPPY       chizai/pref/54/data.parquet
+    0.20     0.16     0.15     0.32     35616    1   13  SNAPPY       chizai/pref/77/data.parquet
+    0.20     0.15     0.14     0.50    157728    1   13  SNAPPY       chizai/pref/46/data.parquet
+    0.18     0.14     0.13     0.38     57456    1   13  SNAPPY       chizai/pref/42/data.parquet
+    0.17     0.13     0.12     0.62    280080    1   13  SNAPPY       chizai/pref/93/data.parquet
+    0.17     0.12     0.12     0.70    384384    1   13  SNAPPY       chizai/pref/56/data.parquet
+    0.17     0.14     0.13     0.25     34560    1   13  SNAPPY       chizai/pref/02/data.parquet
+    0.16     0.12     0.11     0.47    190080    1   13  SNAPPY       chizai/pref/72/data.parquet
+    0.16     0.11     0.11     0.36     78960    1   13  SNAPPY       chizai/pref/94/data.parquet
+    0.15     0.12     0.12     0.25     33264    1   13  SNAPPY       chizai/pref/69/data.parquet
+    0.15     0.11     0.10     0.61    310464    1   13  SNAPPY       chizai/pref/57/data.parquet
+    0.14     0.09     0.09     1.01    631824    1   13  SNAPPY       chizai/pref/52/data.parquet
+    0.12     0.08     0.08     0.65    376320    1   13  SNAPPY       chizai/pref/66/data.parquet
+    0.11     0.07     0.07     0.60    310944    1   13  SNAPPY       chizai/pref/76/data.parquet
+    0.11     0.07     0.07     0.60    384384    1   13  SNAPPY       chizai/pref/63/data.parquet
+    0.10     0.08     0.07     0.19     39072    1   13  SNAPPY       chizai/pref/32/data.parquet
+    0.10     0.07     0.07     0.28     99888    1   13  SNAPPY       chizai/pref/49/data.parquet
+    0.09     0.07     0.07     0.15     10368    1   13  SNAPPY       chizai/pref/01/data.parquet
+    0.09     0.07     0.07     0.14     13824    1   13  SNAPPY       chizai/pref/71/data.parquet
+    0.09     0.06     0.06     0.64    453600    1   13  SNAPPY       chizai/pref/62/data.parquet
+    0.09     0.09     0.08     0.28       439    1   10  ZSTD         master/_M_shokugyo_hw/data.parquet
+    0.08     0.05     0.05     0.48    310464    1   13  SNAPPY       chizai/pref/64/data.parquet
+    0.07     0.05     0.05     0.55    395136    1   13  SNAPPY       chizai/pref/61/data.parquet
+    0.07     0.05     0.05     0.48    310464    1   13  SNAPPY       chizai/pref/60/data.parquet
+    0.07     0.06     0.05     0.10     10752    1   13  SNAPPY       chizai/pref/88/data.parquet
+    0.07     0.05     0.05     0.17      8429    1    8  SNAPPY       chizai/pref/_meta.parquet
+    0.06     0.05     0.04     0.10      1918    1    6  SNAPPY       master/_M_city/data.parquet
+    0.06     0.05     0.04     0.19     50400    1   13  SNAPPY       chizai/pref/35/data.parquet
+    0.06     0.05     0.04     0.18     81840    1   13  SNAPPY       chizai/pref/48/data.parquet
+    0.06     0.04     0.04     0.21    113376    1   13  SNAPPY       chizai/pref/47/data.parquet
+    0.05     0.04     0.04     0.26    109632    1   13  SNAPPY       chizai/pref/73/data.parquet
+    0.05     0.04     0.04     0.19     70128    1   13  SNAPPY       chizai/pref/75/data.parquet
+    0.05     0.04     0.04     0.17     69120    1   13  SNAPPY       chizai/pref/74/data.parquet
+    0.04     0.04     0.04     0.44      1732    1    5  ZSTD         hellowork/_list/20261007.parquet
+    0.04     0.03     0.03     0.05      7296    1   13  SNAPPY       chizai/pref/26/data.parquet
+    0.04     0.04     0.04     0.48      1903    1    5  ZSTD         hellowork/_list/20261002.parquet
+    0.04     0.04     0.04     0.48      1895    1    5  ZSTD         hellowork/_list/20261003.parquet
+    0.04     0.03     0.03     0.10     21024    1   13  SNAPPY       chizai/pref/17/data.parquet
+    0.04     0.04     0.04     0.48      1885    1    5  ZSTD         hellowork/_list/20261004.parquet
+    0.04     0.04     0.03     0.48      1897    1    5  ZSTD         hellowork/_list/20261001.parquet
+    0.04     0.03     0.03     0.13     69120    1   13  SNAPPY       chizai/pref/92/data.parquet
+    0.03     0.03     0.03     0.32      1273    1    5  ZSTD         hellowork/_list/20261006.parquet
+    0.03     0.03     0.03     0.31      1217    1    5  ZSTD         hellowork/_list/20261005.parquet
+    0.03     0.02     0.02     0.11     52416    1   13  SNAPPY       chizai/pref/95/data.parquet
+    0.02     0.02     0.02     0.04      5808    1   13  SNAPPY       chizai/pref/28/data.parquet
+    0.02     0.02     0.02     0.10     52416    1   13  SNAPPY       chizai/pref/96/data.parquet
+    0.02     0.02     0.02     0.17       659    1    5  ZSTD         hellowork/_list/20260930.parquet
+    0.02     0.02     0.01     0.04       840    1   11  SNAPPY       jma/nagano/data.parquet
+    0.02     0.02     0.02     0.16       620    1    5  ZSTD         hellowork/_list/20260927.parquet
+    0.02     0.02     0.02     0.15       595    1    5  ZSTD         hellowork/_list/20260928.parquet
+    0.02     0.01     0.01     0.02       308    1   11  SNAPPY       n_roudou/juri_sangyo/data.parquet
+    0.02     0.02     0.02     0.13       510    1    5  ZSTD         hellowork/_list/20260929.parquet
+    0.02     0.02     0.02     0.03       536    1    7  ZSTD         master/_M_sangyo/data.parquet
+    0.01     0.01     0.01     0.01        36    1   11  SNAPPY       master/_M_zairyu_shikaku/data.parquet
+    0.01     0.01     0.01     0.02       329    1    6  ZSTD         master/_M_shokugyo/data.parquet
+    0.01     0.01     0.01     0.01       864    1   13  SNAPPY       chizai/pref/00/data.parquet
+    0.01     0.01     0.01     0.01       238    1    5  SNAPPY       master/_M_country/data.parquet
+    0.01     0.01     0.01     0.01        94    1    8  SNAPPY       chizai/pref/_tables.parquet
+    0.01     0.01     0.01     0.00       101    1   14  SNAPPY       master/_M_age/data.parquet
+    0.01     0.01     0.01     0.00        48    1   10  SNAPPY       master/_M_pref/data.parquet
+    0.01     0.01     0.01     0.00         5    1    9  SNAPPY       zairyu/t2/_periods.parquet
+    0.01     0.01     0.00     0.00        48    1    6  SNAPPY       master/_M_pref/data_bak.parquet
 
-Traceback (most recent call last):
-  File "/home/runner/work/stats-api/stats-api/ops/parquet_audit.py", line 23, in <module>
-    data = b.download_as_bytes()
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 1552, in download_as_bytes
-    self._prep_and_do_download(
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 4732, in _prep_and_do_download
-    _raise_from_invalid_response(exc)
-  File "/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/site-packages/google/cloud/storage/blob.py", line 5240, in _raise_from_invalid_response
-    raise exceptions.from_http_status(response.status_code, message, response=response)
-google.api_core.exceptions.NotFound: 404 GET https://storage.googleapis.com/download/storage/v1/b/stats-api-491107-data/o/hellowork%2Fkyujin%2F202609.parquet?generation=1791436685275906&alt=media: No such object: stats-api-491107-data/hellowork/kyujin/202609.parquet: ('Request failed with status code', 404, 'Expected one of', <HTTPStatus.OK: 200>, <HTTPStatus.PARTIAL_CONTENT: 206>)
+== コーデック別 ==
+SNAPPY         151 files  現在   412.80 MB  → zstd3   293.53 MB / zstd9   253.61 MB
+ZSTD            16 files  現在     4.52 MB  → zstd3     4.52 MB / zstd9     3.75 MB
+合計             167 files  現在   417.32 MB  → zstd3   298.05 MB / zstd9   257.36 MB
+
+created_by: {'parquet-cpp-arrow version 25.0': 156, 'parquet-cpp-arrow version 18.1': 9, 'parquet-cpp-arrow version 24.0': 2}
