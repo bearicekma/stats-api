@@ -92,7 +92,9 @@ def _parse_hw_page(html: str) -> tuple[tuple[str, str], dict[str, str], list[dic
         for td in tr.find_all(["td", "th"]):
             text = td.get_text(" ", strip=True)
             norm = _nfkc(text)
-            sm = re.match(r"^(\d{3}-\d{2})\s*(.+)$", norm)
+            if norm in ("小分類", "") or re.match(r"^[〇○]\s*例示職業名", norm):
+                continue  # 表の見出し行（「小分類」「〇例示職業名、☓例示職業名」）は読み飛ばす
+            sm =re.match(r"^(\d{3}-\d{2})\s*(.+)$", norm)
             cm = re.match(r"^(\d{3})\s+(.+)$", norm)
             if sm:
                 cur = {"code": sm.group(1), "name": re.sub(r"^\S+\s*", "", text.strip()), "examples": None, "not_examples": None}
