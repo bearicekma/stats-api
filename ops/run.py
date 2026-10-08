@@ -8,7 +8,7 @@
 
 from app.collectors import hellowork as hw
 
-DRY_RUN = True                              # まず短時間の確認（保存なし）→ 問題なければ False にして push
+DRY_RUN = False                             # まず短時間の確認（保存なし）→ 問題なければ False にして push
 TIME_BUDGET = 60 if DRY_RUN else 25 * 60    # 秒
 
 hw.backfill_shokugyo(time_budget=TIME_BUDGET, dry_run=DRY_RUN, save_every=200)
