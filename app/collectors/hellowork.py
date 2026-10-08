@@ -29,6 +29,8 @@ DATA_PREFIX     = "hellowork/kyujin"
 LIST_PREFIX     = "hellowork/_list"
 CITY_PATH       = "master/_M_city/data.parquet"
 SANGYO_PATH     = "master/_M_sangyo/data.parquet"
+SHOKUGYO_PATH   = "master/_M_shokugyo_hw/data.parquet"
+BACKFILL_TRIED  = "hellowork/_backfill/shokugyo_tried.json"
 BASE_URL        = "https://www.hellowork.mhlw.go.jp/kensaku/"
 SEARCH_URL      = BASE_URL + "GECA110010.do"
 PREF_CODE       = "20"
@@ -73,7 +75,9 @@ FIELD_MAP = [
     ("ikujiKyugyoStkJisseki", "育児休業取得実績"), ("kaigoKyugyoStkJisseki", "介護休業取得実績"),
     ("kangoKyukaStkJisseki", "看護休暇取得実績"), ("gkjnKoyoJisseki", "外国人雇用実績"), ("shtnKssu", "支店等の数"),
     ("*支店等", "支店等"), ("*年商", "年商"), ("*主要取引先", "主要取引先"), ("jgshTkjk", "事業所の特記事項"),
-    ("sksu", "職種"), ("shigotoNy", "仕事内容"), ("koyoKeitai", "雇用形態"),
+    ("sksu", "職種"),
+    ("*職業分類_大分類コード", "職業分類_大分類コード"), ("*職業分類_中分類コード", "職業分類_中分類コード"),
+    ("shokugyoBruiCode", "職業分類_小分類コード"), ("shigotoNy", "仕事内容"), ("koyoKeitai", "雇用形態"),
     ("koyoKeitaiSsinIgaiNoMeisho", "雇用形態_正社員以外の名称"), ("koyoKeitaiSsinNoUmu", "正社員登用制度"),
     ("koyoKeitaiSsinJisseki", "正社員登用実績"), ("koyoKikan", "雇用期間"), ("koyoKikanSu", "雇用期間_期間"),
     ("koyoKikanYMD", "雇用期間_年月日"), ("koyoKikanKeiyakuKsnNoKnsi", "契約更新の可能性"),
@@ -292,6 +296,12 @@ def parse_detail(html: str) -> dict:
         text = e.get_text(" ", strip=True)
         if text:
             raw.setdefault(e["id"][3:], text)
+    # 職種欄の「職種解説」リンク（job tag）の code= は厚生労働省編職業分類の小分類コード（例: 048-02）
+    a = soup.find(id="ID_shokugyojohou")
+    if a is not None and a.get("href"):
+        code = parse_qs(urlparse(a["href"]).query).get("code", [""])[0]
+        if re.fullmatch(r"\d{3}-\d{2}", code):
+            raw["shokugyoBruiCode"] = code
     return raw
 
 
@@ -548,6 +558,97 @@ def refresh_codes(yyyymm: str, dry_run: bool = True) -> pd.DataFrame:
     return after
 
 
+# ---------- 職業分類コードの付与（_M_shokugyo_hw） ----------
+
+def load_shokugyo_dai(bucket) -> dict[str, str]:
+    # 厚労省編職業分類の 中分類コード → 大分類コード（マスタがなければ空）
+    m = _read_parquet(bucket, SHOKUGYO_PATH)
+    return {} if m is None else dict(zip(m["chu_code"], m["dai_code"]))
+
+
+def shokugyo_parents(code, dai_map: dict[str, str]) -> tuple[str | None, str | None]:
+    # 小分類コード（例: 048-02）→ (大分類コード, 中分類コード)
+    if code is None or pd.isna(code) or not code:
+        return None, None
+    return dai_map.get(code[:3]), code[:3]
+
+
+def backfill_shokugyo(time_budget: int = 1500, dry_run: bool = True, save_every: int = 200) -> dict:
+    # 保存済みの月ファイルの求人について詳細ページを取り直し、職業分類コードの3列だけを書き足す（ほかの列は変えない）
+    # - 詳細ページのURLは一覧ファイル（hellowork/_list/）から求人番号で引く。掲載終了で取れない求人は空のまま
+    # - 取得を試した求人番号は BACKFILL_TRIED に記録し、次の実行では飛ばす（何回かに分けて実行する前提）
+    # - 夜間収集（20:00〜21:55）と同じファイルに書き込まないよう、19:45〜22:00 は途中で止める
+    started = time.monotonic()
+    bucket  = storage.Client().bucket(BUCKET_NAME)
+    months  = sorted(b.name for b in bucket.list_blobs(prefix=DATA_PREFIX + "/") if b.name.endswith(".parquet"))
+    frames  = {p: normalize(_read_parquet(bucket, p)) for p in months}
+    urls = {}
+    for p in sorted(b.name for b in bucket.list_blobs(prefix=LIST_PREFIX + "/") if b.name.endswith(".parquet")):
+        lk = _read_parquet(bucket, p)
+        urls.update(dict(zip(lk["kjno"].map(_digits), lk["url"])))
+    tried_blob = bucket.blob(BACKFILL_TRIED)
+    tried = set(json.loads(tried_blob.download_as_text())) if tried_blob.exists() else set()
+    dai_map = load_shokugyo_dai(bucket)
+
+    need = [k for df in frames.values() for k in df.loc[df["職業分類_小分類コード"].isna(), "求人番号"].map(_digits)]
+    todo = [k for k in dict.fromkeys(need) if k not in tried and k in urls]
+    no_url = sum(1 for k in set(need) if k not in urls)
+    print(f"shokugyo backfill: コードなし {len(set(need))}件 / 試行済み {len(set(need) & tried)}件 / URLなし {no_url}件 / 今回の対象 {len(todo)}件")
+
+    found, ended, fails, done = {}, 0, 0, 0
+
+    def flush():
+        # 取得できたコードを月ファイルに書き足し、試行済みリストを保存する
+        for p, df in frames.items():
+            keys = df["求人番号"].map(_digits)
+            hit = keys.isin(found.keys()) & df["職業分類_小分類コード"].isna()
+            if not hit.any():
+                continue
+            df.loc[hit, "職業分類_小分類コード"] = keys[hit].map(found)
+            parents = [shokugyo_parents(c, dai_map) for c in df.loc[hit, "職業分類_小分類コード"]]
+            df.loc[hit, "職業分類_大分類コード"] = [x[0] for x in parents]
+            df.loc[hit, "職業分類_中分類コード"] = [x[1] for x in parents]
+            frames[p] = normalize(df)
+            if not dry_run:
+                _write_parquet(bucket, p, frames[p], schema=SCHEMA)
+        if not dry_run:
+            tried_blob.upload_from_string(json.dumps(sorted(tried)), content_type="application/json")
+
+    client = httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=60, follow_redirects=True)
+    try:
+        for k in todo:
+            now = _now()
+            if time.monotonic() - started > time_budget or fails >= 5 or (now.hour, now.minute) >= (19, 45) and now.hour < 22:
+                print("shokugyo backfill: 時間上限・連続失敗・夜間収集の時間帯のため打ち切り")
+                break
+            time.sleep(DETAIL_INTERVAL)
+            try:
+                r = client.get(urls[k])
+                r.raise_for_status()
+            except Exception as e:
+                fails += 1
+                print(f"shokugyo backfill: 取得失敗 {type(e).__name__}")
+                continue
+            fails = 0
+            raw = parse_detail(r.text)
+            if raw.get("kjNo") and raw.get("shokugyoBruiCode"):
+                found[k] = raw["shokugyoBruiCode"]
+            else:
+                ended += 1
+            tried.add(k)
+            done += 1
+            if done % save_every == 0:
+                flush()
+                print(f"shokugyo backfill: {done}件処理 / コード取得 {len(found)}件 / 掲載終了など {ended}件 / {time.monotonic() - started:.0f}秒")
+    finally:
+        client.close()
+    flush()
+    left = len(todo) - done
+    total = sum(int(df["職業分類_小分類コード"].notna().sum()) for df in frames.values())
+    print(f"shokugyo backfill: 今回 {done}件処理 / コード取得 {len(found)}件 / 掲載終了など {ended}件 / 残り {left}件 / 全体のコードあり {total}件")
+    return {"done": done, "found": len(found), "ended": ended, "left": left}
+
+
 # ---------- メイン ----------
 
 def collect_hellowork(max_details: int = 200, dry_run: bool = False):
@@ -578,6 +679,7 @@ def collect_hellowork(max_details: int = 200, dry_run: bool = False):
         # 3. 詳細ページを取得（件数上限・時間上限・連続失敗で打ち切り）
         cities  = load_city_master(bucket)
         sangyo  = load_sangyo_master(bucket)
+        dai_map = load_shokugyo_dai(bucket)
         records, fails = [], 0
         for link in todo.head(max_details).to_dict("records"):
             if time.monotonic() - started > TIME_BUDGET or fails >= 5:
@@ -593,6 +695,7 @@ def collect_hellowork(max_details: int = 200, dry_run: bool = False):
                 rec = to_record(raw, link, today)
                 rec["就業場所_市区町村"], rec["就業場所_市区町村コード"] = match_city(rec.get("就業場所_住所"), cities)
                 rec["産業分類_大分類コード"], rec["産業分類_中分類コード"], rec["産業分類_小分類コード"] = match_sangyo(rec.get("産業分類"), sangyo)
+                rec["職業分類_大分類コード"], rec["職業分類_中分類コード"] = shokugyo_parents(rec.get("職業分類_小分類コード"), dai_map)
                 records.append(rec)
                 fails = 0
             except Exception as e:
