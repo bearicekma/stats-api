@@ -1,5 +1,5 @@
 # 一時的な読み取り専用ワークフロー（claude/parquet-audit ブランチ専用・main には入れない）
-# GCS上のParquetの圧縮方式とサイズを集計し、結果を同じブランチの ops/parquet_audit.log にコミットする
+# GCS上のParquetの圧縮方式とサイズを集計し、結果を同じブランチの ops/parquet_audit_result.txt にコミットする
 name: parquet-audit
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
           echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
           echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
       - name: 集計を実行
-        run: PYTHONUNBUFFERED=1 python ops/parquet_audit.py 2>&1 | tee ops/parquet_audit.log
+        run: PYTHONUNBUFFERED=1 python ops/parquet_audit.py 2>&1 | tee ops/parquet_audit_result.txt
       - name: 認証情報を削除
         if: always()
         run: rm -f /tmp/sa_key.json
@@ -34,6 +34,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add ops/parquet_audit.log
+          git add ops/parquet_audit_result.txt
           git commit -q -m "parquet audit log [skip ci]"
           git push -q origin HEAD:claude/parquet-audit
