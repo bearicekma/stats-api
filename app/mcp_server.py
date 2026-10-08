@@ -96,7 +96,7 @@ async def stats_get_collection(
 @mcp.tool()
 async def master_get(
     collection_name: Annotated[str, Field(
-        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku / _M_sangyo"
+        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku / _M_age / _M_sangyo / _M_shokugyo / _M_shokugyo_hw"
     )],
     year: Annotated[Optional[str], Field(description="_M_calendarのみ: 年で絞込。例 2026")] = None,
     month: Annotated[Optional[str], Field(description="_M_calendarのみ: 月で絞込 1-12")] = None,
@@ -113,7 +113,12 @@ async def master_get(
     - _M_calendar        カレンダーマスタ（祝日・平日判定、1950年〜）
     - _M_country         国名マスタ（財務省貿易統計ベース）
     - _M_zairyu_shikaku  在留資格マスタ（e-Stat cat01ベース）
+    - _M_age             年齢マスタ（各歳・5歳階級・10歳階級・3区分・4区分など）
     - _M_sangyo          産業分類マスタ（日本標準産業分類 令和5年改定、大・中・小分類）
+    - _M_shokugyo        職業分類マスタ（日本標準職業分類 平成21年告示、大・中・小分類、329件）
+    - _M_shokugyo_hw     職業分類マスタ（厚生労働省編職業分類 令和4年改定、大・中・小分類、439件）
+                         ハローワーク求人の 職業分類_*コード と対応。jsco_chu_code で日本標準の中分類に集約できる。
+                         例示職業名（examples / not_examples）を含むため応答が大きい
 
     絞り込みパラメータは _M_calendar のみ有効。全件取得は重いため
     _M_calendar は year か from_date/to_date での絞込を推奨。
