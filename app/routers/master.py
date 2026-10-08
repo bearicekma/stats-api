@@ -5,6 +5,8 @@
 # /master/_M_country  : 国名マスタ（財務省貿易統計 統計国名符号表ベース）
 # /master/_M_zairyu_shikaku : 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
 # /master/_M_sangyo   : 産業分類マスタ（日本標準産業分類 令和5年改定、大・中・小分類）
+# /master/_M_shokugyo    : 職業分類マスタ（日本標準職業分類 平成21年告示、大・中・小分類）
+# /master/_M_shokugyo_hw : 職業分類マスタ（厚生労働省編職業分類 令和4年改定、大・中・小分類）
 
 from datetime import datetime
 
@@ -45,6 +47,8 @@ async def get_master(collection_name: str, request: Request):
     - `_M_zairyu_shikaku` 在留資格マスタ（e-Stat 在留外国人統計 cat01ベース）
     - `_M_age` 年齢マスタ（各歳・5歳階級・10歳階級・3区分・4区分・労働力調査型・学齢区分）
     - `_M_sangyo` 産業分類マスタ（日本標準産業分類 第14回改定・令和5年、小分類536件）
+    - `_M_shokugyo` 職業分類マスタ（日本標準職業分類 平成21年告示、小分類329件）
+    - `_M_shokugyo_hw` 職業分類マスタ（厚生労働省編職業分類 令和4年改定、小分類439件）
 
     **_M_pref のレスポンスフィールド:**
     - `code` (string) 都道府県コード（2桁）
@@ -119,6 +123,22 @@ async def get_master(collection_name: str, request: Request):
     - `is_kanri` (bool) 「管理，補助的経済活動を行う事業所」（コード末尾0）か
     - 出典: ハローワークインターネットサービス 産業分類コード一覧
 
+    **_M_shokugyo のレスポンスフィールド（小分類1件につき1行）:**
+    - `code` (string) 小分類コード（3桁）
+    - `name` (string) 小分類名
+    - `chu_code` / `chu_name` 中分類コード（2桁）・中分類名
+    - `dai_code` / `dai_name` 大分類コード（A〜L）・大分類名
+    - 出典: 総務省 日本標準職業分類（平成21年12月告示）分類項目名
+
+    **_M_shokugyo_hw のレスポンスフィールド（小分類1件につき1行）:**
+    - `code` (string) 小分類コード（例: 067-01）
+    - `name` (string) 小分類名
+    - `chu_code` / `chu_name` 中分類コード（3桁）・中分類名
+    - `dai_code` / `dai_name` 大分類コード（01〜15）・大分類名
+    - `jsco_chu_code` / `jsco_chu_name` 対応する日本標準職業分類の中分類（対応表による。対応なしはnull）
+    - `examples` / `not_examples` 例示職業名（〇該当する例／☓該当しない例）
+    - 出典: ハローワークインターネットサービス 厚生労働省編職業分類（令和4年改定）
+
     **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
@@ -130,6 +150,8 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_zairyu_shikaku` 在留資格マスタ一覧
     - `/master/_M_age` 年齢マスタ一覧
     - `/master/_M_sangyo` 産業分類マスタ一覧
+    - `/master/_M_shokugyo` 職業分類マスタ（日本標準）一覧
+    - `/master/_M_shokugyo_hw` 職業分類マスタ（厚労省編）一覧
     """
     tmp_path = None
     try:
@@ -168,6 +190,8 @@ async def get_master(collection_name: str, request: Request):
             "_M_zairyu_shikaku": "sort_order",
             "_M_age": "age",
             "_M_sangyo": "code",
+            "_M_shokugyo": "code",
+            "_M_shokugyo_hw": "code",
         }
         order_col = order_map.get(collection_name)
         order_by  = f"ORDER BY {order_col}" if order_col else ""
