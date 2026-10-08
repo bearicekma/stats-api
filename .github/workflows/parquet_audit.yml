@@ -1,0 +1,39 @@
+# 一時的な読み取り専用ワークフロー（claude/parquet-audit ブランチ専用・main には入れない）
+# GCS上のParquetの圧縮方式とサイズを集計し、結果を同じブランチの ops/parquet_audit.log にコミットする
+name: parquet-audit
+on:
+  push:
+    branches: [claude/parquet-audit]
+    paths: [ops/parquet_audit.py, .github/workflows/parquet_audit.yml]
+concurrency:
+  group: parquet-audit
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q google-cloud-storage pyarrow
+      - name: GCS認証情報を設定
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > /tmp/sa_key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa_key.json" >> $GITHUB_ENV
+          echo "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" >> $GITHUB_ENV
+      - name: 集計を実行
+        run: PYTHONUNBUFFERED=1 python ops/parquet_audit.py 2>&1 | tee ops/parquet_audit.log
+      - name: 認証情報を削除
+        if: always()
+        run: rm -f /tmp/sa_key.json
+      - name: ログをブランチにコミット
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add ops/parquet_audit.log
+          git commit -q -m "parquet audit log [skip ci]"
+          git push -q origin HEAD:claude/parquet-audit
