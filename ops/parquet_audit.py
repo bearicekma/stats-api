@@ -20,7 +20,10 @@ print(f"{'合計':10s} {len(blobs):5d} files {sum(ext.values())/1e6:10.2f} MB")
 
 rows = []
 for b in sorted([b for b in blobs if b.name.endswith(".parquet")], key=lambda x: -x.size):
-    data = b.download_as_bytes()
+    try:
+        data = bucket.blob(b.name).download_as_bytes()   # 世代指定なし＝最新版を読む（バックフィルが並行して上書きしているため）
+    except Exception as ex:
+        print(f"skip {b.name}: {type(ex).__name__}"); continue
     pf = pq.ParquetFile(io.BytesIO(data)); md = pf.metadata
     cc = [md.row_group(i).column(j) for i in range(md.num_row_groups) for j in range(md.num_columns)]
     tbl = pf.read()
