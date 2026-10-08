@@ -173,7 +173,7 @@ def _bucket():
 
 def _save_df(df: pd.DataFrame, path: str):
     buf = io.BytesIO()
-    df.to_parquet(buf, index=False)
+    df.to_parquet(buf, index=False, compression="zstd", compression_level=9)   # ZSTD レベル9（Snappy 比で約3割小さい）
     buf.seek(0)
     _bucket().blob(path).upload_from_file(buf, content_type="application/octet-stream")
     print(f"✅ gs://{BUCKET_NAME}/{path} ({len(df)}件)", flush=True)
