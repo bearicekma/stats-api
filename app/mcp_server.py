@@ -96,7 +96,7 @@ async def stats_get_collection(
 @mcp.tool()
 async def master_get(
     collection_name: Annotated[str, Field(
-        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku / _M_age / _M_sangyo / _M_shokugyo / _M_shokugyo_hw"
+        description="マスタ名。_M_pref / _M_city / _M_calendar / _M_country / _M_zairyu_shikaku / _M_age / _M_sangyo / _M_shokugyo / _M_shokugyo_hw / _M_houjin"
     )],
     year: Annotated[Optional[str], Field(description="_M_calendarのみ: 年で絞込。例 2026")] = None,
     month: Annotated[Optional[str], Field(description="_M_calendarのみ: 月で絞込 1-12")] = None,
@@ -104,6 +104,13 @@ async def master_get(
     to_date: Annotated[Optional[str], Field(description="_M_calendarのみ: 終了日 YYYY-MM-DD")] = None,
     holiday_only: Annotated[Optional[str], Field(description="_M_calendarのみ: trueで祝日のみ")] = None,
     weekday: Annotated[Optional[str], Field(description="_M_calendarのみ: 曜日コード 0=月〜6=日")] = None,
+    pref: Annotated[Optional[str], Field(description="_M_houjinのみ: 都道府県コード2桁。カンマ区切り。99=国外。例 20")] = None,
+    city: Annotated[Optional[str], Field(description="_M_houjinのみ: 団体コード5桁。カンマ区切り。例 20202（松本市）")] = None,
+    number: Annotated[Optional[str], Field(description="_M_houjinのみ: 法人番号13桁。カンマ区切り")] = None,
+    status: Annotated[Optional[str], Field(description="_M_houjinのみ: all（既定）/ active=存続 / closed=閉鎖")] = None,
+    kind: Annotated[Optional[str], Field(description="_M_houjinのみ: 法人種別コード3桁。301=株式会社 / 305=合同会社 / 201=地方公共団体 など")] = None,
+    name: Annotated[Optional[str], Field(description="_M_houjinのみ: 商号・フリガナの部分一致。例 信州")] = None,
+    limit: Annotated[Optional[int], Field(description="_M_houjinのみ: 取得件数の上限。_M_houjin は既定 200")] = None,
 ) -> str:
     """マスタデータを取得する。
 
@@ -120,12 +127,20 @@ async def master_get(
                          ハローワーク求人の 職業分類_*コード と対応。jsco_chu_code で日本標準の中分類に集約できる。
                          例示職業名（examples / not_examples）を含むため応答が大きい
 
-    絞り込みパラメータは _M_calendar のみ有効。全件取得は重いため
-    _M_calendar は year か from_date/to_date での絞込を推奨。
+    - _M_houjin          法人マスタ（国税庁 法人番号 全件データ、全国・閉鎖法人を含む、約580万件、毎月末時点）
+                         pref・city・number のどれかが必須。法人番号・商号・法人種別・所在地（団体コード5桁）・
+                         状態（存続/閉鎖）・閉鎖年月日・法人番号指定年月日など。法人番号は本店所在地で登録
+
+    絞り込みパラメータは _M_calendar（year〜weekday）と _M_houjin（pref〜limit）のみ有効。全件取得は重いため
+    _M_calendar は year か from_date/to_date での絞込を推奨。_M_houjin は status・kind・name でも絞ること。
     """
+    if collection_name == "_M_houjin" and limit is None:
+        limit = 200
     return await _get(f"/master/{collection_name}", {
         "year": year, "month": month, "from": from_date, "to": to_date,
         "holiday_only": holiday_only, "weekday": weekday,
+        "pref": pref, "city": city, "number": number, "status": status, "kind": kind, "name": name,
+        "limit": limit, "format": "json" if collection_name == "_M_houjin" else None,
     })
 
 
@@ -562,36 +577,4 @@ async def zairyu_get(
     return await _get("/zairyu/data", {
         "from": from_ym, "to": to_ym, "pref": pref, "city": city, "kokuseki": kokuseki, "shikaku": shikaku,
         "by": by, "seirei": seirei, "limit": limit, "format": "json",
-    })
-
-
-# =============================================================================
-# 法人番号（国税庁 全件データ）
-# =============================================================================
-
-@mcp.tool()
-async def houjin_meta() -> str:
-    """法人マスタ（国税庁 法人番号 全件データ）の基準日と、都道府県別の件数（存続・閉鎖）を返す。"""
-    return await _get("/houjin/meta")
-
-
-@mcp.tool()
-async def houjin_get(
-    pref: Annotated[str, Field(description="都道府県コード2桁（必須）。カンマ区切りで5つまで。99=国外。例: 20（長野県）")],
-    city: Annotated[Optional[str], Field(description="団体コード5桁。カンマ区切り。政令市は区のコード。例: 20202（松本市）")] = None,
-    status: Annotated[Optional[str], Field(description="all（既定）/ active=存続のみ / closed=閉鎖のみ")] = None,
-    kind: Annotated[Optional[str], Field(description="法人種別コード3桁。カンマ区切り。301=株式会社 / 305=合同会社 / 201=地方公共団体 など")] = None,
-    name: Annotated[Optional[str], Field(description="商号・フリガナの部分一致。例: 信州")] = None,
-    number: Annotated[Optional[str], Field(description="法人番号13桁。カンマ区切り")] = None,
-    limit: Annotated[Optional[int], Field(description="取得件数の上限。既定 200")] = 200,
-) -> str:
-    """国税庁 法人番号公表サイトの全件データ（毎月末時点、閉鎖法人を含む）から法人を検索する。
-
-    返す列: 法人番号 / 商号 / フリガナ / 法人種別 / 都道府県・団体コード（5桁）・所在地 / 状態（存続・閉鎖）/
-    閉鎖年月日・閉鎖事由 / 法人番号指定年月日 など。法人番号は本店所在地で登録されている。
-    件数が多いので、city・status・kind・name で絞り、limit を使うこと。件数の全体像は houjin_meta で確認できる。
-    """
-    return await _get("/houjin/master", {
-        "pref": pref, "city": city, "status": status, "kind": kind, "name": name, "number": number,
-        "limit": limit, "format": "json",
     })
