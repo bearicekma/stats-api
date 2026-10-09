@@ -39,7 +39,7 @@ jobs:
           python-version: '3.11'
 
       - name: 依存パッケージをインストール
-        run: pip install httpx pandas pyarrow google-cloud-storage beautifulsoup4
+        run: pip install httpx pandas pyarrow google-cloud-storage beautifulsoup4 duckdb
 
       - name: GCS認証情報を設定
         run: |

@@ -7,15 +7,20 @@
 # /master/_M_sangyo   : 産業分類マスタ（日本標準産業分類 令和5年改定、大・中・小分類）
 # /master/_M_shokugyo    : 職業分類マスタ（日本標準職業分類 平成21年告示、大・中・小分類）
 # /master/_M_shokugyo_hw : 職業分類マスタ（厚生労働省編職業分類 令和4年改定、大・中・小分類）
+# /master/_M_houjin   : 法人マスタ（国税庁 法人番号 全件データ、全国・閉鎖法人を含む、約580万件）
+#                       大きいため、絞り込み必須・GCSの世代が変わったときだけ読み直す・CSVはストリーミング
 
 from datetime import datetime
 
 import duckdb
 import tempfile
 import os
+import re
+import threading
+import unicodedata
 
 from fastapi           import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from google.cloud      import storage
 
 router = APIRouter(prefix="/master", tags=["マスタデータ"])
@@ -32,6 +37,135 @@ def _download_parquet(collection_name: str) -> str:
         tmp_path = tmp.name
     bucket.blob(gcs_path).download_to_filename(tmp_path)
     return tmp_path
+
+
+# ── _M_houjin（法人マスタ）──────────────────────────────────
+# 全国で約580万行・約220MBあるため、他のマスタと違って
+#   ・一時ファイルを残し、GCSの世代番号が変わったときだけ取り直す
+#   ・pref / city / number のどれかでの絞り込みを必須にする
+#   ・CSVは少しずつ書き出す（ストリーミング）。JSONは10万行まで
+# ファイルは scripts/collect_houjin.py（GitHub Actions、毎月3日）が作成する
+HOUJIN_PATH     = "master/_M_houjin/data.parquet"
+HOUJIN_JSON_MAX = 100_000
+HOUJIN_CHUNK    = 50_000
+_houjin_cache: dict = {}
+_houjin_lock = threading.Lock()
+
+
+def _houjin_local() -> str | None:
+    blob = storage.Client().bucket(BUCKET_NAME).get_blob(HOUJIN_PATH)
+    if blob is None:
+        return None
+    with _houjin_lock:
+        hit = _houjin_cache.get("file")
+        if hit and hit[0] == blob.generation and os.path.exists(hit[1]):
+            return hit[1]
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            path = tmp.name
+        blob.download_to_filename(path)
+        _houjin_cache["file"] = (blob.generation, path)
+        # 古い世代のファイルは、読み込み中のリクエストがあり得るので少し後で消す
+        if hit and os.path.exists(hit[1]):
+            threading.Timer(600, lambda p=hit[1]: os.path.exists(p) and os.remove(p)).start()
+        return path
+
+
+def _tokens(text, sep: str = ",") -> list:
+    return [t.strip() for t in str(text or "").split(sep) if t.strip()]
+
+
+def _zenkaku(s: str) -> str:
+    # 半角英数記号を全角にする（法人番号データの商号は英数字が全角のことが多い）
+    return "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else ("　" if c == " " else c) for c in s)
+
+
+def _bad(msg: str, hint: str = None):
+    body = {"error": msg}
+    if hint:
+        body["hint"] = hint
+    return JSONResponse(status_code=400, content=body)
+
+
+def _get_houjin(params: dict):
+    fmt    = params.get("format", "json")
+    status = params.get("status", "all")
+    if fmt not in ("json", "csv"):
+        return _bad("format は json または csv")
+    if status not in ("all", "active", "closed"):
+        return _bad("status は all / active / closed")
+    prefs  = list(dict.fromkeys(p.zfill(2) for p in _tokens(params.get("pref"))))
+    cities = [c.zfill(5) for c in _tokens(params.get("city"))]
+    nums   = _tokens(params.get("number"))
+    if not (prefs or cities or nums):
+        return _bad("_M_houjin は全国で約580万件あるため、pref・city・number のどれかで絞り込んでください",
+                    "例: /master/_M_houjin?pref=20&format=csv（長野県）")
+    if any(not re.fullmatch(r"\d{2}", p) or not ("01" <= p <= "47" or p == "99") for p in prefs):
+        return _bad("pref は都道府県コード2桁（01〜47）または 99（国外）")
+    if any(not re.fullmatch(r"\d{5}", c) for c in cities):
+        return _bad("city は団体コード5桁（例: 20202）")
+    if any(not re.fullmatch(r"\d{13}", n) for n in nums):
+        return _bad("number は法人番号13桁")
+    kinds = _tokens(params.get("kind"))
+    if any(not re.fullmatch(r"\d{3}", k) for k in kinds):
+        return _bad("kind は法人種別コード3桁（例: 301）")
+    limit = params.get("limit")
+    if limit is not None and not str(limit).isdigit():
+        return _bad("limit は正の整数")
+
+    where, args = [], []
+    for col, vals in (("都道府県コード", prefs), ("団体コード", cities), ("法人番号", nums), ("法人種別コード", kinds)):
+        if vals:
+            where.append(f"{col} IN ({','.join('?' * len(vals))})")
+            args.extend(vals)
+    if status != "all":
+        where.append("状態 = ?")
+        args.append("存続" if status == "active" else "閉鎖")
+    name = (params.get("name") or "").strip()
+    if name:
+        nf   = unicodedata.normalize("NFKC", name)
+        kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in nf)   # ひらがな→カタカナ（フリガナ照合用）
+        cond = []
+        for pat in dict.fromkeys([name, nf, _zenkaku(nf), kata]):
+            cond.append("(商号 LIKE ? OR フリガナ LIKE ?)")
+            args.extend([f"%{pat}%", f"%{pat}%"])
+        where.append("(" + " OR ".join(cond) + ")")
+
+    try:
+        path = _houjin_local()
+        if path is None:
+            return JSONResponse(status_code=503, content={"error": "_M_houjin がまだありません（GitHub Actions の collect-houjin を mode=full で実行してください）"})
+        sql = f"SELECT * FROM read_parquet('{path}') WHERE " + " AND ".join(where)
+        sql += " ORDER BY 都道府県コード NULLS LAST, 団体コード NULLS LAST, 法人番号"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+
+        if fmt == "csv":
+            con    = duckdb.connect()
+            reader = con.execute(sql, args).fetch_record_batch(HOUJIN_CHUNK)
+
+            def _stream():
+                # 先頭だけBOM付きヘッダー。以降は HOUJIN_CHUNK 行ずつCSVにして送る（全件をメモリに載せない）
+                try:
+                    yield ("\ufeff" + ",".join(reader.schema.names) + "\n").encode("utf-8")
+                    for batch in reader:
+                        yield batch.to_pandas().to_csv(index=False, header=False).encode("utf-8")
+                finally:
+                    con.close()
+
+            return StreamingResponse(_stream(), media_type="text/csv; charset=utf-8")
+
+        con = duckdb.connect()
+        n = con.execute(f"SELECT COUNT(*) FROM ({sql})", args).fetchone()[0]
+        if n > HOUJIN_JSON_MAX:
+            con.close()
+            return _bad(f"結果が {n:,} 行あり、JSONの上限 {HOUJIN_JSON_MAX:,} 行を超えています",
+                        "format=csv を使うか、city・status・kind・name で絞り込んでください。先頭だけ見るなら limit")
+        df = con.execute(sql, args).df()
+        con.close()
+        data = df.to_dict(orient="records")
+        return {"collection": "_M_houjin", "updated_at": str(datetime.now()), "count": len(data), "data": data}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
 
 
 @router.get("/{collection_name}", summary="マスタデータ取得")
@@ -139,7 +273,29 @@ async def get_master(collection_name: str, request: Request):
     - `examples` / `not_examples` 例示職業名（〇該当する例／☓該当しない例）
     - 出典: ハローワークインターネットサービス 厚生労働省編職業分類（令和4年改定）
 
-    **URL例:**
+**_M_houjin のレスポンスフィールド（法人1件につき1行、全国・閉鎖法人を含む、約580万件）:**
+    - `基準日` 全件データの作成時点（毎月末）/ `法人番号`（13桁、文字列）/ `商号` / `フリガナ` / `英語商号`
+    - `法人種別コード` / `法人種別`（101 国の機関 / 201 地方公共団体 / 301 株式会社 / 302 有限会社 / 303 合名会社 /
+      304 合資会社 / 305 合同会社 / 399 その他の設立登記法人 / 401 外国会社等 / 499 その他）
+    - `都道府県コード` / `団体コード`（5桁、_M_city の code_5_digit と結合可。政令市は区のコード）/ `都道府県` / `市区町村` /
+      `丁目番地等` / `郵便番号` / `国外所在地`
+    - `状態`（存続・閉鎖）/ `閉鎖年月日` / `閉鎖事由コード` / `閉鎖事由`（01 清算の結了等 / 11 合併による解散等 /
+      21 登記官による閉鎖 / 31 その他の清算の結了等）/ `承継先法人番号`
+    - `法人番号指定年月日` / `変更年月日` / `更新年月日` / `最終処理区分コード` / `最終処理区分` / `変更事由の詳細` / `検索対象除外`
+    - 法人番号は本店（主たる事務所）の所在地で登録されている。毎月3日に前月末時点の全件データで作り直す
+    - 出典: 国税庁法人番号公表サイト「基本3情報ダウンロード」（全件データ）を加工して作成
+
+    **_M_houjin のクエリパラメータ（_M_houjinのみ有効。pref・city・number のどれかは必須）:**
+    - `pref` 都道府県コード2桁。カンマ区切り可。99=国外。例: `20`
+    - `city` 団体コード5桁。カンマ区切り可。例: `20202`（松本市）
+    - `number` 法人番号13桁。カンマ区切り可
+    - `status` all（既定）/ active=存続のみ / closed=閉鎖のみ
+    - `kind` 法人種別コード3桁。カンマ区切り可。例: `301,305`
+    - `name` 商号・フリガナの部分一致（全角半角の違いを吸収、ひらがなはカタカナでも照合）
+    - `limit` 取得件数の上限
+    - `format` json（既定、10万行まで）/ csv（件数無制限、ストリーミング。東京都は100万行超）
+
+        **URL例:**
     - `/master/_M_pref` 都道府県一覧
     - `/master/_M_city` 市区町村一覧
     - `/master/_M_calendar?year=2026` 2026年のカレンダー
@@ -152,7 +308,12 @@ async def get_master(collection_name: str, request: Request):
     - `/master/_M_sangyo` 産業分類マスタ一覧
     - `/master/_M_shokugyo` 職業分類マスタ（日本標準）一覧
     - `/master/_M_shokugyo_hw` 職業分類マスタ（厚労省編）一覧
+    - `/master/_M_houjin?pref=20&format=csv` 長野県の法人（全件、CSV）
+    - `/master/_M_houjin?city=20202&status=active&kind=301` 松本市の存続している株式会社
     """
+    if collection_name == "_M_houjin":
+        return _get_houjin(dict(request.query_params))
+
     tmp_path = None
     try:
         tmp_path = _download_parquet(collection_name)

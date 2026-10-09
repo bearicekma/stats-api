@@ -1,5 +1,5 @@
 # 国税庁 法人番号公表サイト「基本3情報ダウンロード」全件データ（全国・閉鎖法人を含む）の収集
-# 都道府県別＋国外の全件ファイル（CSV・Unicode、ZIP）を取得し、都道府県ごとのParquetにしてGCSへ保存する。
+# 都道府県別＋国外の全件ファイル（CSV・Unicode、ZIP）を取得し、全国1ファイルの法人マスタ _M_houjin としてGCSへ保存する。
 # 実行は GitHub Actions（scripts/collect_houjin.py）から。全件ファイルは毎月末時点で作成され、翌月1日に公開される。
 #
 # ダウンロードの仕組み（ページはJavaScriptで動くが、中身は単純なフォームPOST）:
@@ -8,8 +8,9 @@
 #   3. トークン＋selDlFileNo（ファイル番号）＋event=download をPOSTすると ZIP が返る
 #
 # GCS:
-#   houjin/zenken/pref=01.parquet … pref=47.parquet, pref=99.parquet（国外）
-#   houjin/zenken/_meta.json   基準日・取得日時・都道府県別の件数（/houjin/meta 用）
+#   master/_M_houjin/data.parquet  全国（約580万行、zstd）。都道府県コード→団体コード→法人番号の順に並べ、
+#                                  行グループ（10万行）単位で都道府県の絞り込みが効くようにしている
+#   master/_M_houjin/_meta.json    基準日・取得日時・都道府県別の件数（確認用）
 #
 # 元CSVはヘッダー行なし・30列（リソース定義書の順）。列数が違えば処理を止める。
 
@@ -30,7 +31,8 @@ from google.cloud import storage
 PAGE_URL     = "https://www.houjin-bangou.nta.go.jp/download/zenken/index.html"
 TOKEN_NAME   = "jp.go.nta.houjin_bangou.framework.web.common.CNSFWTokenProcessor.request.token"
 BUCKET_NAME  = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
-PREFIX       = "houjin/zenken"
+PREFIX       = "master/_M_houjin"
+DATA_PATH    = f"{PREFIX}/data.parquet"
 META_PATH    = f"{PREFIX}/_meta.json"
 FILE_INTERVAL = 5   # ダウンロードの間隔（秒）。短時間の大量アクセスを避けるため直列で間隔を空ける
 JST = timezone(timedelta(hours=9))
@@ -328,30 +330,43 @@ def run(mode: str = "dryrun") -> int:
                 other = set(df["都道府県コード"].dropna()) - {code}
                 if other:
                     print(f"  ⚠️ {code}: ほかの都道府県コードが混在 {sorted(other)}", flush=True)
-            df.to_parquet(os.path.join(workdir, f"pref={code}.parquet"), index=False)
+            df.to_parquet(os.path.join(workdir, f"part_{code}.parquet"), index=False)
             s = _summary(code, df)
             summaries.append(s)
             base_dates.update(bd for bd in map(_base_date, fnames) if bd)
             print(f"  ✔ {code} {s['都道府県']}: {s['件数']:,}件（存続 {s['存続']:,} / 閉鎖 {s['閉鎖']:,}）{' + '.join(fnames)}", flush=True)
             del df
 
-        if len(base_dates) > 1:
+        if len(base_dates) != 1:
             raise RuntimeError(f"ファイルの基準日がそろっていません: {sorted(base_dates)}")
+        base_date = next(iter(base_dates))
+
+        # 全国1ファイルにまとめる（基準日の列を先頭に付け、都道府県→団体コード→法人番号の順に並べる）
+        import duckdb
+        out = os.path.join(workdir, "data.parquet")
+        con = duckdb.connect()
+        con.execute(
+            f"COPY (SELECT CAST(? AS VARCHAR) AS 基準日, * FROM read_parquet('{workdir}/part_*.parquet') "
+            f"ORDER BY 都道府県コード NULLS LAST, 団体コード NULLS LAST, 法人番号) "
+            f"TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 100000)", [base_date])
+        n_all = con.execute(f"SELECT COUNT(*), COUNT(DISTINCT 法人番号) FROM read_parquet('{out}')").fetchone()
+        con.close()
+        if n_all[0] != n_all[1] or n_all[0] != sum(s["件数"] for s in summaries):
+            raise RuntimeError(f"件数が合いません: 行数 {n_all[0]:,} / 法人番号 {n_all[1]:,} / 都道府県別の合計 {sum(s['件数'] for s in summaries):,}")
+        print(f"📦 全国1ファイル: {n_all[0]:,}行 / {os.path.getsize(out) / 1e6:.1f}MB", flush=True)
 
         # すべて成功したら保存する（途中で失敗したら何も書かない）
         bucket = _bucket()
-        for code in need:
-            bucket.blob(f"{PREFIX}/pref={code}.parquet").upload_from_filename(
-                os.path.join(workdir, f"pref={code}.parquet"), content_type="application/octet-stream")
+        bucket.blob(DATA_PATH).upload_from_filename(out, content_type="application/octet-stream")
         meta = {
-            "基準日": next(iter(base_dates), None),
+            "基準日": base_date,
             "取得日時": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
             "出典": "国税庁法人番号公表サイト 基本3情報ダウンロード（全件データ）",
             "件数": sum(s["件数"] for s in summaries),
             "都道府県別": summaries,
         }
         bucket.blob(META_PATH).upload_from_string(json.dumps(meta, ensure_ascii=False), content_type="application/json")
-        print(f"✅ gs://{BUCKET_NAME}/{PREFIX}/ に {len(need)}ファイル保存（計 {meta['件数']:,}件、基準日 {meta['基準日']}）", flush=True)
+        print(f"✅ gs://{BUCKET_NAME}/{DATA_PATH} に保存（計 {meta['件数']:,}件、基準日 {meta['基準日']}）", flush=True)
         return len(need)
     finally:
         client.close()
