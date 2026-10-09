@@ -1,0 +1,8 @@
+commit: 726c14dcd2c88f1a967cbddfcf014009a1724044
+status: success
+finished_at: 2026-10-09 10:22:51 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/37869399451
+----
+新: master/_M_houjin/data.parquet 195.4MB / 5,837,980行 / 基準日 2026-09-30（_meta の件数 5,837,980）
+旧: houjin/zenken/ 49ファイル / 327.4MB
+削除しました: 49ファイル / 残り 0ファイル（houjin/ 以下）
