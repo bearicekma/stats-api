@@ -50,7 +50,9 @@ def encrypt(obj) -> str:
 
 
 def norm(s) -> str:
-    return re.sub(r"\s", "", unicodedata.normalize("NFKC", str(s or "")))
+    if s is None or pd.isna(s):
+        return ""
+    return re.sub(r"\s", "", unicodedata.normalize("NFKC", str(s)))
 
 
 bucket = storage.Client().bucket(hw.BUCKET_NAME)
