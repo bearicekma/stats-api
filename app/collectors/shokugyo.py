@@ -94,7 +94,10 @@ def _parse_hw_page(html: str) -> tuple[tuple[str, str], dict[str, str], list[dic
             norm = _nfkc(text)
             if norm in ("小分類", "") or re.match(r"^[〇○]\s*例示職業名", norm):
                 continue  # 表の見出し行（「小分類」「〇例示職業名、☓例示職業名」）は読み飛ばす
-            sm =re.match(r"^(\d{3}-\d{2})\s*(.+)$", norm)
+            # 小分類コード。ページに「0045-08」のような0の多い誤記があるため、先頭の余分な0は読み捨てる
+            sm = re.match(r"^0?(\d{3}-\d{2})\s*(.+)$", norm)
+            if not sm and re.match(r"^\d+-\d+", norm):
+                print(f"警告: 小分類コードとして読めないセル: {norm[:40]}")
             cm = re.match(r"^(\d{3})\s+(.+)$", norm)
             if sm:
                 cur = {"code": sm.group(1), "name": re.sub(r"^\S+\s*", "", text.strip()), "examples": None, "not_examples": None}
@@ -144,8 +147,8 @@ def build_hw_master(client: httpx.Client | None = None) -> pd.DataFrame:
             print(f"対応表にあってマスタにないコード: {unknown}")
 
     problems = []
-    if (len(dai), len(chu), len(df)) != (15, 99, 439):
-        problems.append(f"大 {len(dai)} / 中 {len(chu)} / 小 {len(df)}（想定 15 / 99 / 439）")
+    if (len(dai), len(chu), len(df)) != (15, 99, 440):
+        problems.append(f"大 {len(dai)} / 中 {len(chu)} / 小 {len(df)}（想定 15 / 99 / 440）")
     if df[["chu_name", "dai_name"]].isna().any().any():
         problems.append(f"中分類・大分類に対応しない小分類: {df.loc[df['chu_name'].isna() | df['dai_name'].isna(), 'code'].tolist()[:10]}")
     if problems:
