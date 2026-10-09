@@ -14,7 +14,7 @@ from google.cloud import storage
 
 from app.collectors import hellowork as hw
 
-DRY_RUN = True
+DRY_RUN = False
 
 CODES = {
     "000150f38651f08d": "096-01",
