@@ -9,7 +9,7 @@ from app.collectors import shokugyo as sk
 pd.set_option("display.width", 200)
 pd.set_option("display.max_colwidth", 60)
 
-DRY_RUN = True
+DRY_RUN = False
 
 h = sk.save_hw_master(dry_run=DRY_RUN)
 print(h[h["code"].isin(["045-06", "045-07", "045-08", "045-09"])][["code", "name", "jsco_chu_code", "examples"]].to_string(index=False))
