@@ -43,6 +43,8 @@ jobs:
 
       - name: ops/run.py を実行
         id: run
+        env:
+          GBIZ_API_TOKEN: ${{ secrets.GBIZ_API_TOKEN }}   # gBizINFO API（法人マスタの属性付与）。ログに出さないこと
         run: |
           set -o pipefail
           PYTHONPATH=. PYTHONUNBUFFERED=1 python ops/run.py 2>&1 | tee /tmp/ops_output.log
