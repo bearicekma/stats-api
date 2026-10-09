@@ -1,20 +1,28 @@
-# 目的：Cloud Run（stats-api）のメモリ・CPU設定を確認する（_M_houjin を1ファイルで置く設計の判断用）
-# 内容：読み取りのみ。Cloud Run Admin API でサービスのリソース設定を取得して出力する
+# 目的：法人マスタを master/_M_houjin に移したため、旧保存先 houjin/zenken/（都道府県別48ファイル＋_meta.json）を削除する
+# 内容：master/_M_houjin/data.parquet があり、件数が合うことを確かめてから、houjin/zenken/ 以下を削除する
 
-import google.auth
-import google.auth.transport.requests
-import httpx
+import io
+import json
+import os
 
-cred, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-cred.refresh(google.auth.transport.requests.Request())
-url = f"https://run.googleapis.com/v2/projects/{project}/locations/asia-northeast1/services/stats-api"
-r = httpx.get(url, headers={"Authorization": f"Bearer {cred.token}"}, timeout=30)
-print("status:", r.status_code)
-if r.status_code == 200:
-    t = r.json().get("template", {})
-    for c in t.get("containers", []):
-        print("resources:", c.get("resources"))
-    print("scaling:", t.get("scaling"), "/ maxInstanceRequestConcurrency:", t.get("maxInstanceRequestConcurrency"), "/ timeout:", t.get("timeout"))
-    print("executionEnvironment:", t.get("executionEnvironment"))
+import pyarrow.parquet as pq
+from google.cloud import storage
+
+DRY_RUN = False
+
+b = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
+new = b.get_blob("master/_M_houjin/data.parquet")
+meta = json.loads(b.blob("master/_M_houjin/_meta.json").download_as_text())
+assert new is not None, "master/_M_houjin/data.parquet がありません"
+rows = pq.ParquetFile(io.BytesIO(new.download_as_bytes())).metadata.num_rows
+print(f"新: master/_M_houjin/data.parquet {new.size / 1e6:.1f}MB / {rows:,}行 / 基準日 {meta['基準日']}（_meta の件数 {meta['件数']:,}）")
+assert rows == meta["件数"], "行数が _meta.json と合いません"
+
+old = list(b.list_blobs(prefix="houjin/zenken/"))
+print(f"旧: houjin/zenken/ {len(old)}ファイル / {sum(x.size for x in old) / 1e6:.1f}MB")
+if DRY_RUN:
+    print("DRY_RUN のため削除しません")
 else:
-    print(r.text[:300])
+    for x in old:
+        x.delete()
+    print(f"削除しました: {len(old)}ファイル / 残り {len(list(b.list_blobs(prefix='houjin/')))}ファイル（houjin/ 以下）")
