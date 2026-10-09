@@ -1,72 +1,79 @@
-# 目的：Gビズインフォ「データダウンロード」（一括CSV）のフォームの仕組みを確認する（法人マスタへの属性付与の設計用）
-# 内容：読み取りのみ。ダウンロードページのHTMLから form・input・select・ボタン・スクリプト内のURLを集計して出力する
-#       トークンは送らない・出力しない。GCS には書き込まない
+# 目的：Gビズインフォ「データダウンロード」の基本情報（Kihonjoho）を実際に取得し、列・件数・充足率を確認する（法人マスタへの属性付与の設計用）
+# 内容：読み取りのみ。GCS には書き込まない。トークンは出力しない。出力は列名・件数・充足率・値の種類数の集計だけ
 
+import io
+import os
 import re
+import tempfile
+import time
+import zipfile
 
 import httpx
+import pandas as pd
 from bs4 import BeautifulSoup
 
-URL = "https://info.gbiz.go.jp/hojin/DownloadTop"
-c = httpx.Client(timeout=60, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (stats-api ops)"})
-r = c.get(URL)
-print("status:", r.status_code, "final url:", re.sub(r";jsessionid=[^?]*", ";jsessionid=…", str(r.url)), "len:", len(r.text))
-soup = BeautifulSoup(r.text, "html.parser")
+TOKEN = os.environ.get("GBIZ_API_TOKEN", "")
+print("トークン:", "あり" if TOKEN else "なし")
+BASE = "https://info.gbiz.go.jp"
+c = httpx.Client(timeout=httpx.Timeout(60.0, read=1800.0), follow_redirects=True,
+                 headers={"User-Agent": "Mozilla/5.0 (stats-api ops)"})
 
-for i, f in enumerate(soup.find_all("form")):
-    print(f"\n[form {i}] action={re.sub(r';jsessionid=[^?]*', ';jsessionid=…', f.get('action') or '')} method={f.get('method')} id={f.get('id')} name={f.get('name')}")
-    for el in f.find_all(["input", "select", "button", "textarea"]):
-        attrs = {k: (v if k != "value" or el.get("type") != "hidden" or len(str(v)) < 40 else str(v)[:8] + "…") for k, v in el.attrs.items() if k in ("type", "name", "id", "value", "onclick", "class", "data-id", "data-type")}
-        lab = ""
-        if el.get("id"):
-            l = soup.find("label", attrs={"for": el["id"]})
-            lab = l.get_text(" ", strip=True) if l else ""
-        if not lab:
-            p = el.find_parent(["label", "td", "li", "div"])
-            lab = p.get_text(" ", strip=True)[:40] if p else ""
-        print(f"   <{el.name}> {attrs} 「{lab}」")
-        if el.name == "select":
-            for o in el.find_all("option"):
-                print(f"       option value={o.get('value')!r} 「{o.get_text(strip=True)}」")
+# セッションを作り、フォームの送信先（jsessionid付き）を得る
+r = c.get(f"{BASE}/hojin/DownloadTop")
+form = BeautifulSoup(r.text, "html.parser").find("form", id="down")
+action = form.get("action")
+url = action if action.startswith("http") else BASE + action
+print("送信先:", re.sub(r";jsessionid=[^?]*", ";jsessionid=…", url))
 
-# フォーム外のリンク・ボタン（ダウンロード関連）
-print("\n[ダウンロード関連の a / button（フォーム外も含む）]")
-for el in soup.find_all(["a", "button"]):
-    t = el.get_text(" ", strip=True)
-    href = el.get("href") or ""
-    if any(w in (t + href + str(el.get("onclick", ""))) for w in ("ダウンロード", "download", "Download", "csv", "zip")):
-        print(f"   <{el.name}> text={t[:30]!r} href={re.sub(r';jsessionid=[^?]*', ';jsessionid=…', href)[:120]!r} onclick={str(el.get('onclick', ''))[:120]!r} id={el.get('id')}")
+data = {"downfile": "Kihonjoho", "meta": "", "downenc": "UTF-8", "apiToken": TOKEN, "isZip": "on", "downtype": "zip"}
+t0 = time.time()
+path = os.path.join(tempfile.mkdtemp(), "kihon.bin")
+with c.stream("POST", url, data=data) as resp:
+    print("status:", resp.status_code, "content-type:", resp.headers.get("content-type"),
+          "disposition:", resp.headers.get("content-disposition"), "length:", resp.headers.get("content-length"))
+    with open(path, "wb") as f:
+        for chunk in resp.iter_bytes(1 << 20):
+            f.write(chunk)
+size = os.path.getsize(path)
+print(f"取得 {size / 1e6:.1f}MB / {time.time() - t0:.0f}秒")
+head = open(path, "rb").read(4)
+if head[:2] != b"PK":
+    txt = open(path, "rb").read(600).decode("utf-8", "replace")
+    print("ZIPではありません。先頭:", re.sub(r"\s+", " ", txt)[:400])
+    raise SystemExit(0)
 
-# スクリプト内のURL・関数（ダウンロード処理を探す）
-print("\n[script]")
-for s in soup.find_all("script"):
-    src = s.get("src")
-    if src:
-        print("   src:", src)
-    txt = s.string or ""
-    for m in re.findall(r"""['"](/[^'"]*(?:[Dd]ownload|api|csv|zip)[^'"]*)['"]""", txt):
-        print("   url in script:", m[:150])
-    for m in re.findall(r"function\s+(\w*[Dd]ownload\w*)", txt):
-        print("   function:", m)
-    if "ajax" in txt or "fetch(" in txt:
-        for line in txt.splitlines():
-            if any(w in line for w in ("url", "ajax", "fetch(", "action", "token", "Token")):
-                print("   >", line.strip()[:160])
+z = zipfile.ZipFile(path)
+for i in z.infolist():
+    print(f"  ZIP内: {i.filename} {i.file_size / 1e6:.1f}MB")
+name = max(z.infolist(), key=lambda i: i.file_size).filename
 
-# 外部JSの中も確認（同一サイトのもののみ）
-for s in soup.find_all("script", src=True):
-    src = s["src"]
-    if "gbiz" in src or src.startswith("/"):
-        u = src if src.startswith("http") else "https://info.gbiz.go.jp" + src
-        try:
-            js = c.get(u).text
-        except Exception as e:
-            print("   取得失敗", u, e)
-            continue
-        hits = set(re.findall(r"""['"`](/[^'"`\s]*(?:[Dd]ownload|api|csv|zip)[^'"`\s]*)['"`]""", js))
-        if hits:
-            print(f"   {u.split('?')[0][-60:]}: {sorted(hits)[:20]}")
-        for line in js.splitlines():
-            if "token" in line.lower() and ("header" in line.lower() or "data" in line.lower()):
-                print("     >", line.strip()[:160])
+# 先頭行（ヘッダー）と、全体の充足率をチャンクで集計する
+with z.open(name) as fh:
+    first = fh.readline().decode("utf-8-sig")
+print("\nヘッダー:", first.strip()[:2000])
+
+counts, total = None, 0
+pref_counts = {}
+nagano = None
+with z.open(name) as fh:
+    for ch in pd.read_csv(io.TextIOWrapper(fh, encoding="utf-8-sig"), dtype=str, keep_default_na=False, chunksize=200_000):
+        filled = (ch != "").sum()
+        counts = filled if counts is None else counts + filled
+        total += len(ch)
+        loc = next((col for col in ch.columns if "所在地" in col or col.lower() == "location"), None)
+        if loc:
+            p = ch[loc].str.extract(r"^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)")[0].fillna("?")
+            for k, v in p.value_counts().items():
+                pref_counts[k] = pref_counts.get(k, 0) + int(v)
+            nag = ch[ch[loc].str.startswith("長野県")]
+            nf = (nag != "").sum()
+            nagano = nf if nagano is None else nagano + nf
+print(f"\n総行数: {total:,}")
+print("列ごとの充足率（空でない割合）: 全国 / 長野県")
+nn = pref_counts.get("長野県", 0)
+for col in counts.index:
+    a = counts[col] / total if total else 0
+    b = (nagano[col] / nn) if nagano is not None and nn else float("nan")
+    print(f"  {col}: {a:.1%} / {b:.1%}")
+print("\n都道府県別の行数（上位と長野県）:", dict(sorted(pref_counts.items(), key=lambda x: -x[1])[:8]), "長野県:", nn)
 print("\n完了")
