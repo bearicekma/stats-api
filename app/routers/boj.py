@@ -2,10 +2,14 @@
 # /boj/pass  : コードAPIパススルー（ページネーション自動処理）
 # /boj/layer : 階層APIパススルー（ページネーション自動処理）
 # /boj/meta  : メタデータAPIパススルー
+#
+# /boj/pass・/boj/layer は既定で縦持ち（1行1値）に変換して返す。
+# format=json（既定）縦持ちJSON / format=csv 縦持ちCSV / format=raw 日銀APIの入れ子のまま
 
 from fastapi           import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import httpx
+import pandas as pd
 
 router = APIRouter(prefix="/boj", tags=["日本銀行"])
 
@@ -51,6 +55,81 @@ async def boj_fetch_all(endpoint: str, params: dict) -> dict:
     return data
 
 
+# 出力形式（このAPI独自のformat。日銀APIへは常にformat=jsonで問い合わせる）
+OUTPUT_FORMATS = ("json", "csv", "raw")
+
+# 縦持ちの列順
+LONG_COLUMNS = ["系列コード", "系列名", "分類", "単位", "期種", "時点", "値"]
+
+
+def to_date(period, frequency: str) -> str:
+    # 日銀の時期（SURVEY_DATES）を期首日の YYYY-MM-DD に変換する
+    # 暦年 YYYY→1月1日 / 年度 YYYY→4月1日 / 暦年半期 YYYYHH→1月・7月 / 年度半期 YYYYHH→4月・10月
+    # 四半期 YYYYQQ→1・4・7・10月 / 月次 YYYYMM→月初 / 週次・日次 YYYYMMDD→その日
+    s    = str(period)
+    freq = (frequency or "").upper()
+    if len(s) == 8:
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    if len(s) == 4:
+        return f"{s}-04-01" if "(MAR)" in freq else f"{s}-01-01"
+    if len(s) != 6:
+        return s  # 想定外の形式はそのまま返す
+    n = int(s[4:])
+    if freq.startswith("SEMIANNUAL"):
+        month = (4 if "(SEP)" in freq else 1) + (n - 1) * 6
+    elif freq.startswith("QUARTERLY"):
+        month = 1 + (n - 1) * 3
+    else:
+        month = n
+    return f"{s[:4]}-{month:02d}-01"
+
+
+def to_long(data: dict) -> list[dict]:
+    # 系列ごとの SURVEY_DATES・VALUES の配列を、1行1値のレコードに展開する
+    rows = []
+    for series in data.get("RESULTSET", []):
+        values = series.get("VALUES") or {}
+        dates  = values.get("SURVEY_DATES") or []
+        nums   = values.get("VALUES") or []
+        freq   = series.get("FREQUENCY")
+        for period, value in zip(dates, nums):
+            rows.append({
+                "系列コード": series.get("SERIES_CODE"),
+                "系列名":     series.get("NAME_OF_TIME_SERIES_J") or series.get("NAME_OF_TIME_SERIES"),
+                "分類":       series.get("CATEGORY_J") or series.get("CATEGORY"),
+                "単位":       series.get("UNIT_J") or series.get("UNIT"),
+                "期種":       freq,
+                "時点":       to_date(period, freq),
+                "値":         value,  # 欠損値は null のまま
+            })
+    return rows
+
+
+async def boj_fetch_and_format(endpoint: str, params: dict, label: str):
+    # 日銀APIから全件取得し、指定の出力形式で返す
+    fmt = (params.pop("format", None) or "json").lower()
+    if fmt not in OUTPUT_FORMATS:
+        return JSONResponse(status_code=400, content={"error": "format は json / csv / raw のいずれか"})
+
+    params["format"] = "json"  # 日銀APIへは常にJSONで問い合わせる
+    params.setdefault("lang", "jp")
+    data = await boj_fetch_all(endpoint, params)
+
+    if fmt == "raw":
+        return data
+
+    rows = to_long(data)
+    if fmt == "csv":
+        df = pd.DataFrame(rows, columns=LONG_COLUMNS)
+        return Response(content=df.to_csv(index=False).encode("utf-8-sig"), media_type="text/csv; charset=utf-8")
+    return {
+        "source":  label,
+        "message": data.get("MESSAGE"),
+        "count":   len(rows),
+        "data":    rows,
+    }
+
+
 @router.get(
     "/pass",
     summary="コードAPI — 系列コードで時系列データを取得",
@@ -66,6 +145,17 @@ async def boj_pass(request: Request):
     - `startDate` (任意) 開始期（月次・日次ともYYYYMM形式）
     - `endDate` (任意) 終了期（同上）
 
+    **出力形式（任意）:**
+    - `format=json`（既定）縦持ち（1行1値）のJSON
+    - `format=csv` 縦持ちのCSV（UTF-8 BOM付き）
+    - `format=raw` 日銀APIのまま（系列ごとに SURVEY_DATES・VALUES が入れ子）
+
+    **縦持ちの列:**
+    系列コード / 系列名 / 分類 / 単位 / 期種 / 時点 / 値
+    - `時点` は期首日の YYYY-MM-DD（月次→月初、四半期→1・4・7・10月、暦年→1月1日、年度→4月1日、
+      暦年半期→1・7月、年度半期→4・10月、週次・日次→その日）
+    - `値` の欠損は null（CSVは空欄）
+
     **主なDB名:**
     - `IR01` 基準割引率・基準貸付利率 / `IR04` 貸出約定平均金利
     - `FM01` 無担保コールO/N物レート / `FM08` 外国為替市況 / `FM09` 実効為替レート
@@ -79,6 +169,7 @@ async def boj_pass(request: Request):
     **URL例:**
     - `/boj/pass?db=FM08&code=FXERD04&startDate=202401` （USD/JPY 日次）
     - `/boj/pass?db=FM08&code=FXERM07&startDate=202401` （USD/JPY 月次平均）
+    - `/boj/pass?db=PR01&code=PRCG20_2600550010&startDate=202001&format=csv` （輸入物価・原油、CSV）
 
     ※ 系列コードは `/boj/meta?db={DB名}` で確認できます。
     """
@@ -106,9 +197,7 @@ async def boj_pass(request: Request):
             }
         )
 
-    params.setdefault("format", "json")
-    params.setdefault("lang",   "jp")
-    return await boj_fetch_all("getDataCode", params)
+    return await boj_fetch_and_format("getDataCode", params, "日銀 コードAPI")
 
 
 @router.get(
@@ -127,9 +216,21 @@ async def boj_layer(request: Request):
     - `startDate` (任意) 開始期（月次: YYYYMM形式）
     - `endDate` (任意) 終了期
 
+    **出力形式（任意）:**
+    - `format=json`（既定）縦持ち（1行1値）のJSON
+    - `format=csv` 縦持ちのCSV（UTF-8 BOM付き）
+    - `format=raw` 日銀APIのまま（系列ごとに SURVEY_DATES・VALUES が入れ子）
+
+    **縦持ちの列:**
+    系列コード / 系列名 / 分類 / 単位 / 期種 / 時点 / 値
+    - `時点` は期首日の YYYY-MM-DD（月次→月初、四半期→1・4・7・10月、暦年→1月1日、年度→4月1日、
+      暦年半期→1・7月、年度半期→4・10月、週次・日次→その日）
+    - `値` の欠損は null（CSVは空欄）
+
     **URL例:**
     - `/boj/layer?db=FF&frequency=Q&layer=1,1,1`
     - `/boj/layer?db=BP01&frequency=M&startDate=202504&endDate=202509&layer=1,1,1`
+    - `/boj/layer?db=PR01&frequency=M&layer=1,3,1,6&startDate=202001&format=csv` （輸入物価・石油石炭天然ガス）
 
     ※ 階層情報は `/boj/meta?db={DB名}` のLAYER1〜LAYER5列で確認できます。
     """
@@ -147,9 +248,7 @@ async def boj_layer(request: Request):
             }
         )
 
-    params.setdefault("format", "json")
-    params.setdefault("lang",   "jp")
-    return await boj_fetch_all("getDataLayer", params)
+    return await boj_fetch_and_format("getDataLayer", params, "日銀 階層API")
 
 
 @router.get(
