@@ -230,9 +230,12 @@ async def boj_pass(
     例: db=FM08, code=FXERD04 → USD/JPY 日次
         db=FM08, code=FXERM07 → USD/JPY 月次平均
     系列コードが不明なら先に boj_meta を呼ぶこと。
+    結果は系列ごとに VALUES.SURVEY_DATES・VALUES.VALUES の配列で返る（入れ子形式）。
     """
+    # MCPでは応答を小さく保つため、日銀APIの入れ子形式（raw）で受け取る
     return await _get("/boj/pass", {
         "db": db, "code": code, "startDate": start_date, "endDate": end_date,
+        "format": "raw",
     })
 
 
@@ -247,10 +250,12 @@ async def boj_layer(
     """日銀の時系列統計データを階層指定で一括取得する（階層API）。
 
     階層情報は boj_meta のレスポンス LAYER1〜LAYER5 列で確認できる。
+    結果は系列ごとに VALUES.SURVEY_DATES・VALUES.VALUES の配列で返る（入れ子形式）。
     """
     return await _get("/boj/layer", {
         "db": db, "layer": layer, "frequency": frequency,
         "startDate": start_date, "endDate": end_date,
+        "format": "raw",
     })
 
 
