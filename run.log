@@ -1,0 +1,17 @@
+commit: 202df218df0c79ddb267b3820cfb0430f29d65bc
+mode: update
+status: success
+finished_at: 2026-10-15 08:57:16 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/38657080818
+----
+🚀 在留外国人統計 収集開始 mode=update
+[estat] getDataCatalog start=1 status=200 bytes=51007
+📋 市区町村別テーブルデータ 5件: ['202312', '202406', '202412', '202506', '202512']
+🎯 取込対象 1件: ['202312']
+[1/1] 23-12-t2_在留外国人統計テーブルデータ（国籍・地域別　在留資格別　市区町村別）
+ℹ️ 202312: 同じ組み合わせの行 161件を合計 {'その他': 161}
+[202312] 215,063行 総数 3,410,992（PVT総計 3,410,992）
+✅ gs://stats-api-491107-data/zairyu/t2/data.parquet (3,628,888件, 12.7MB)
+✅ gs://stats-api-491107-data/zairyu/t2/_periods.parquet (5件, 0.0MB)
+🏁 完了: 1時点を取込 / 全5時点 3,628,888行
+✅ 終了: 1時点
