@@ -1,9 +1,12 @@
 # Google Drive PDF 自動リネーム処理
 #  - 個人Drive(マイドライブ)の対象フォルダ内PDFを走査
 #  - 数日以内アップロード & 未処理(YYYYMMDD形式)のものを抽出
-#  - PDFを直接Geminiに渡して見出しを生成し「YYYYMMDD_見出し」にリネーム
+#  - PDFを直接Geminiに渡し、1回の呼び出しで「見出し」と「紙面の全文テキスト」をJSONで取得
+#  - 見出しで「YYYYMMDD_見出し」にリネーム
+#  - 画像PDFなら、JPEG化で圧縮し全文を不可視テキスト層として埋め込んで差し替え（失敗時はリネームのみ）
 #  - 認証は OAuth 2.0 ユーザー委任(refresh_token)、値は環境変数から取得
 #  - Geminiは候補モデルを順に試すフォールバック方式（廃止/日次上限は即次へ）
+#  - 候補モデルは環境変数 GEMINI_MODELS（カンマ区切り）で上書き可能
 #  - お気に入り状態はGCSにJSONで永続化（drive_rename/favorites.json）
 
 import os
@@ -19,11 +22,25 @@ RECENT_DAYS       = 3       # アップロードからこの日数以内のみ�
 MAX_HEADLINES     = 3       # 連結する見出しの最大本数
 MAX_NAME_LEN      = 100     # ファイル名(日付含む)のおおよその上限
 MAX_FILES_PER_RUN = 20      # 1回のrunで処理する最大件数（無料枠20/日の安全弁）
+RUN_TIME_BUDGET   = 600     # 秒。これを超えたら新しいファイルに着手しない（Cloud Runの900秒タイムアウト対策）
+OPT_MIN_TEXT_CHARS = 50     # 埋め込み用に必要な最低文字数（これ未満なら圧縮しない）
 
-# Geminiの候補モデル（無料枠で使える順。先頭から試す）
-GEMINI_MODELS  = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash"]
-MAX_RPM_RETRY  = 2          # 分次(RPM)一時超過時のリトライ回数
-RPM_RETRY_WAIT = 8          # リトライ前の待機秒数
+# Geminiの候補モデル既定値（先頭から試す）。環境変数 GEMINI_MODELS で上書き可
+_DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+
+
+def _load_gemini_models():
+    # 環境変数 GEMINI_MODELS（例: "gemini-2.5-flash,gemini-2.5-flash-lite"）があればそれを使う
+    raw = os.environ.get("GEMINI_MODELS", "")
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    return models or list(_DEFAULT_GEMINI_MODELS)
+
+
+GEMINI_MODELS     = _load_gemini_models()
+MAX_RPM_RETRY     = 2       # 分次(RPM)一時超過時のリトライ回数
+RPM_RETRY_WAIT    = 8       # リトライ前の待機秒数
+MAX_UNAVAIL_RETRY = 2       # 503(一時的な過負荷)時のリトライ回数
+UNAVAIL_WAIT      = 5       # 503リトライ前の待機秒数
 
 # お気に入り情報のGCS保存先
 GCS_BUCKET_NAME    = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
@@ -99,53 +116,99 @@ def _download_pdf_bytes(service, file_id):
     return buf.read()
 
 
-def _generate_headline(pdf_bytes):
-    # PDFを直接Geminiに渡して主要見出しを生成する。
+def _clean_headline(s):
+    # 見出し1本の前後の空白・中黒を除去
+    return str(s).strip(" 　・\t\r\n")
+
+
+def _parse_analysis(raw):
+    # Geminiの応答(JSON文字列)から (見出しリスト, 全文テキスト) を取り出す。
+    # 出力が途中で切れてJSONが壊れていた場合は、見出しだけ正規表現で救出する（全文は空）。
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            heads = [_clean_headline(h) for h in (data.get("headlines") or [])]
+            heads = [h for h in heads if h][:MAX_HEADLINES]
+            text = str(data.get("text") or "")
+            return heads, text
+    except Exception:
+        pass
+
+    heads = []
+    m = re.search(r'"headlines"\s*:\s*\[(.*?)\]', raw, re.S)
+    if m:
+        for item in re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1)):
+            try:
+                item = json.loads('"' + item + '"')  # エスケープ(\" や \uXXXX)を戻す
+            except Exception:
+                pass
+            item = _clean_headline(item)
+            if item:
+                heads.append(item)
+    return heads[:MAX_HEADLINES], ""
+
+
+def _analyze_pdf(pdf_bytes):
+    # PDFを直接Geminiに渡し、1回の呼び出しで見出しと全文テキストを取得する。
+    # 戻り値: ("見出し1・見出し2・見出し3", 全文テキスト(取れなければ空文字))
     # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
-    # 分次(PerMinute)など一時超過のみ短い待機後にリトライ。
+    # 分次(PerMinute)は短い待機後にリトライ、503(過負荷)も短い待機後にリトライ。
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     prompt = (
-        "これは日本経済新聞の紙面PDFです。"
-        f"この紙面に含まれる主要な記事の見出しを、重要な順に最大{MAX_HEADLINES}本、"
-        "それぞれ簡潔に作ってください。\n"
+        "これは日本経済新聞の紙面PDFです。次のJSONだけを出力してください。\n"
+        '{"headlines": ["見出し1", "見出し2"], "text": "紙面の全文"}\n'
         "条件:\n"
-        "- 各見出しは20文字程度まで\n"
-        "- 記号・改行・番号は付けない\n"
-        "- 1行に1見出しだけを出力（説明文は不要）"
+        f"- headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本。"
+        "各20文字程度まで、記号・改行・番号は付けない\n"
+        "- text: 紙面に掲載された記事の見出しと本文を、読み順にできるだけ漏れなく文字起こししたプレーンテキスト"
+        "（広告は不要）\n"
+        "- JSON以外の文字は一切出力しない"
     )
     parts = [
         types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
         prompt,
     ]
+    config = types.GenerateContentConfig(response_mime_type="application/json")
 
     last_error = None
 
     for model in GEMINI_MODELS:
-        attempt = 0
+        rpm_attempt = 0
+        unavail_attempt = 0
         while True:
             try:
-                resp = client.models.generate_content(model=model, contents=parts)
-                text = (resp.text or "").strip()
-                if not text:
+                resp = client.models.generate_content(model=model, contents=parts, config=config)
+                raw = (resp.text or "").strip()
+                if not raw:
                     last_error = f"{model}: 空応答"
                     break  # 次の候補へ
-                lines = [ln.strip(" 　・-*0123456789.") for ln in text.splitlines() if ln.strip()]
-                lines = [ln for ln in lines if ln][:MAX_HEADLINES]
-                if not lines:
+                heads, text = _parse_analysis(raw)
+                if not heads:
                     last_error = f"{model}: 見出し抽出できず"
                     break  # 次の候補へ
-                return "・".join(lines)
+                return "・".join(heads), text
 
             except Exception as e:
                 msg = str(e)
                 last_error = f"{model}: {msg}"
 
-                # 429以外（404・503など）→ このモデルでは無理、即次の候補へ
-                if "429" not in msg and "RESOURCE_EXHAUSTED" not in msg:
+                is_429 = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg)
+                is_503 = ("503" in msg) or ("UNAVAILABLE" in msg)
+
+                # 503（一時的な過負荷）→ 短い待機で数回だけリトライ、だめなら次の候補へ
+                if is_503 and not is_429:
+                    if unavail_attempt < MAX_UNAVAIL_RETRY:
+                        unavail_attempt += 1
+                        time.sleep(UNAVAIL_WAIT)
+                        continue
+                    break
+
+                # 429/503以外（404・認証など）→ このモデルでは無理、即次の候補へ
+                if not is_429:
                     break
 
                 # limit: 0（無料枠対象外/廃止）→ 即次の候補へ
@@ -157,14 +220,32 @@ def _generate_headline(pdf_bytes):
                     break
 
                 # 分次（PerMinute）など一時的な超過 → 回数内なら待ってリトライ
-                if attempt < MAX_RPM_RETRY:
-                    attempt += 1
+                if rpm_attempt < MAX_RPM_RETRY:
+                    rpm_attempt += 1
                     time.sleep(RPM_RETRY_WAIT)
                     continue
                 else:
                     break  # リトライ尽きた → 次の候補へ
 
     raise RuntimeError(last_error or "見出し生成失敗（全候補）")
+
+
+def _try_optimize(pdf_bytes, text):
+    # 画像PDFなら「JPEG化で圧縮＋全文の不可視テキスト層」を作る。
+    # 戻り値: (新しいPDFバイト列, None)=成功 / (None, 理由)=対象外または失敗（その場合はリネームのみ）
+    if len((text or "").strip()) < OPT_MIN_TEXT_CHARS:
+        return None, "全文テキスト未取得（圧縮せず）"
+    try:
+        from app.pdf_optimize import is_scanned_pdf, optimize_scanned_pdf, verify_text_layer
+
+        if not is_scanned_pdf(pdf_bytes):
+            return None, "既にテキスト層あり（圧縮せず）"
+        new_bytes = optimize_scanned_pdf(pdf_bytes, text)
+        if not verify_text_layer(new_bytes):
+            return None, "検証NG（テキスト層を抽出できず）"
+        return new_bytes, None
+    except Exception as e:
+        return None, f"圧縮失敗: {e}"
 
 
 def _sanitize(title):
@@ -189,6 +270,27 @@ def _unique_name(service, base):
             return candidate
         candidate = f"{base}({n})"
         n += 1
+
+
+def _update_file(service, file_id, new_name, new_bytes):
+    # リネームし、new_bytes があれば中身も差し替える（目印 appProperties も付与）。
+    # 差し替えに失敗したらリネームのみで再試行する。戻り値: 差し替え成功なら None、失敗理由があれば文字列
+    if new_bytes:
+        try:
+            from googleapiclient.http import MediaIoBaseUpload
+            media = MediaIoBaseUpload(io.BytesIO(new_bytes), mimetype="application/pdf", resumable=True)
+            service.files().update(
+                fileId=file_id,
+                body={"name": new_name, "appProperties": {"optimized": "1"}},
+                media_body=media,
+            ).execute()
+            return None
+        except Exception as e:
+            fail_reason = f"差し替え失敗（リネームのみ）: {e}"
+            service.files().update(fileId=file_id, body={"name": new_name}).execute()
+            return fail_reason
+    service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    return None
 
 
 def _get_gcs_bucket():
@@ -236,7 +338,8 @@ def toggle_favorite(file_id: str) -> bool:
 
 
 def run_drive_rename():
-    # メイン処理：対象PDFを走査してリネーム。結果をdictで返す
+    # メイン処理：対象PDFを走査してリネーム（＋画像PDFは圧縮・全文埋め込み）。結果をdictで返す
+    started = time.monotonic()
     service = _get_drive_service()
     files = _list_target_pdfs(service)
 
@@ -257,14 +360,14 @@ def run_drive_rename():
             skipped += 1
             continue
 
-        # 件数上限に達したら、残りは未処理のまま次回へ
-        if processed >= MAX_FILES_PER_RUN:
+        # 件数上限、または時間予算を超えたら、残りは未処理のまま次回へ
+        if processed >= MAX_FILES_PER_RUN or (time.monotonic() - started) > RUN_TIME_BUDGET:
             skipped += 1
             continue
 
         try:
             pdf_bytes = _download_pdf_bytes(service, f["id"])
-            headline = _generate_headline(pdf_bytes)
+            headline, text = _analyze_pdf(pdf_bytes)
             if not headline:
                 failed.append({"name": name, "reason": "見出し生成失敗"})
                 processed += 1
@@ -273,8 +376,19 @@ def run_drive_rename():
             new_base = f"{date_part}_{_sanitize(headline)}"[:MAX_NAME_LEN]
             new_name = _unique_name(service, new_base)
 
-            service.files().update(fileId=f["id"], body={"name": new_name}).execute()
-            renamed.append({"from": name, "to": new_name})
+            # 圧縮＋全文埋め込み（失敗してもリネームは続行）
+            new_bytes, note = _try_optimize(pdf_bytes, text)
+            upload_note = _update_file(service, f["id"], new_name, new_bytes)
+            if upload_note:
+                note, new_bytes = upload_note, None
+
+            item = {"from": name, "to": new_name, "optimized": bool(new_bytes)}
+            if new_bytes:
+                item["size_before"] = len(pdf_bytes)
+                item["size_after"] = len(new_bytes)
+            if note:
+                item["note"] = note
+            renamed.append(item)
             processed += 1
         except Exception as e:
             failed.append({"name": name, "reason": str(e)})
