@@ -1,28 +1,62 @@
-# 目的：医療・介護の求人の産業分類コードが 830 になっている原因を調べる（GCS を読むだけで書き込まない）
-# 内容：月ファイルごとの 830 の件数、830 に付いた「産業分類」の文字列、中分類 83〜85 の分布、_M_sangyo の 83〜85 の行、
-#       現在の照合ルールで付け直した場合のコードを表示する（求人の中身は出さない）
+# 目的：2026/11/2 朝の定期実行で「白黒2値」で圧縮され文字がかすれたPDFを、グレースケール方式で処理し直す
+# 内容：対象フォルダで optimized=1 かつ 11/1 21:30(JST)以降に更新されたPDFを探し、
+#       ① 元の版（Driveの版の履歴の最初の版）をダウンロード
+#       ② 今の版に埋め込み済みの全文テキストを取り出す（Geminiは使わない＝無料枠を消費しない）
+#       ③ 元の版 ＋ 全文 から compress_with_text（グレースケール方式）で作り直して差し替える
+#       ログは公開されるため、ファイル名・IDは出さずサイズと方式だけ表示する
 
 import io
-import os
+import fitz
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-import pandas as pd
-from google.cloud import storage
+from app.collectors import drive_rename as dr
+from app.pdf_optimize import compress_with_text, verify_text_layer
 
-from app.collectors import hellowork as hw
+SINCE = "2026-11-01T12:30:00Z"   # 白黒2値版のデプロイ(11/1 21:30 JST頃)以降
 
-bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
-m = hw.load_sangyo_master(bucket)
-print("_M_sangyo:", len(m), "件 / 列:", list(m.columns))
-print(m[m["chu_code"].isin(["83", "84", "85"])][["code", "name", "chu_code"]].to_string(index=False))
 
-for b in sorted(bucket.list_blobs(prefix="hellowork/kyujin/"), key=lambda b: b.name):
-    df = pd.read_parquet(io.BytesIO(b.download_as_bytes()), columns=["産業分類", "産業分類_中分類コード", "産業分類_小分類コード", "取得日"])
-    print(f"\n== {b.name}: {len(df)}件 / 830 は {int((df['産業分類_小分類コード'] == '830').sum())}件")
-    print("830 に付いた産業分類:", df.loc[df["産業分類_小分類コード"] == "830", "産業分類"].value_counts().head(15).to_dict())
-    print("830 の取得日:", df.loc[df["産業分類_小分類コード"] == "830", "取得日"].astype(str).value_counts().sort_index().to_dict())
-    med = df[df["産業分類_中分類コード"].isin(["83", "84", "85"])]
-    print("中分類83〜85 の小分類:", med["産業分類_小分類コード"].value_counts().to_dict())
-    print("中分類83〜85 の産業分類（上位）:", med["産業分類"].value_counts().head(15).to_dict())
-    re_ = [hw.match_sangyo(n, m)[2] for n in df["産業分類"]]
-    diff = (pd.Series(re_, index=df.index).fillna("") != df["産業分類_小分類コード"].fillna(""))
-    print("現在のルールで付け直すと変わる件数:", int(diff.sum()), "/ 例:", pd.DataFrame({"産業分類": df.loc[diff, "産業分類"], "今": df.loc[diff, "産業分類_小分類コード"], "再": pd.Series(re_, index=df.index)[diff]}).drop_duplicates().head(10).to_dict("records"))
+def download(req):
+    # files().get_media / revisions().get_media のリクエストをバイト列にする
+    buf = io.BytesIO()
+    dl = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        _, done = dl.next_chunk()
+    return buf.getvalue()
+
+
+service = dr._get_drive_service()
+q = (f"'{dr.TARGET_FOLDER_ID}' in parents and trashed = false and mimeType = 'application/pdf' "
+     f"and modifiedTime > '{SINCE}' and appProperties has {{ key='optimized' and value='1' }}")
+files = service.files().list(q=q, fields="files(id, name, size)", pageSize=100).execute().get("files", [])
+print(f"対象: {len(files)}件")
+
+for n, f in enumerate(files, 1):
+    try:
+        revs = service.revisions().list(fileId=f["id"], fields="revisions(id, modifiedTime, size)").execute().get("revisions", [])
+        if len(revs) < 2:
+            print(f"[{n}] スキップ：元の版が見つからない（版 {len(revs)}件）")
+            continue
+        orig = download(service.revisions().get_media(fileId=f["id"], revisionId=revs[0]["id"]))
+        cur = download(service.files().get_media(fileId=f["id"]))
+
+        # 今の版に埋め込まれている全文（不可視テキスト層）を取り出す。折り返しの改行は除く
+        doc = fitz.open(stream=cur, filetype="pdf")
+        text = "".join(p.get_text("text") for p in doc).replace("\n", "")
+        doc.close()
+        if len(text) < dr.OPT_MIN_TEXT_CHARS:
+            print(f"[{n}] スキップ：埋め込み全文を取り出せない（{len(text)}文字）")
+            continue
+
+        new_bytes, mode = compress_with_text(orig, text)
+        if not verify_text_layer(new_bytes):
+            print(f"[{n}] スキップ：検証NG")
+            continue
+
+        media = MediaIoBaseUpload(io.BytesIO(new_bytes), mimetype="application/pdf", resumable=True)
+        service.files().update(fileId=f["id"], body={"appProperties": {"renamed": "1", "optimized": "1"}},
+                               media_body=media).execute()
+        print(f"[{n}] 差し替え：元 {len(orig):,} → 白黒2値 {len(cur):,} → 新 {len(new_bytes):,} bytes"
+              f"（元の{len(new_bytes)/len(orig):.0%}） {mode} / 全文 {len(text)}文字")
+    except Exception as e:
+        print(f"[{n}] 失敗：{type(e).__name__}: {str(e)[:200]}")

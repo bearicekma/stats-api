@@ -1,7 +1,7 @@
 # スキャンPDFの軽量化＋不可視テキスト層の埋め込み（PyMuPDF=fitz と Pillow を使用）
 #  - is_scanned_pdf       : 画像主体でテキスト層が無い「スキャンPDF」かを判定
 #  - compress_with_text   : 【現行】ページごとに自動判定して圧縮し、全文を不可視層として重ねる
-#                             文字主体のページ → 白黒2値(1ビット)で描き直す（大幅に小さくなる）
+#                             文字主体のページ → グレースケールで描き直す（地色を白に飛ばし文字を濃くしてJPEG化）
 #                             写真入りのページ → 元の画像をその場で再圧縮（解像度上限＋JPEG画質）
 #                             それでも元より大きければ → 元のまま全文だけ重ねる
 #  - optimize_scanned_pdf : 【旧方式・未使用】各ページを画像化し直してJPEG化（縮まないことが多い）
@@ -13,8 +13,11 @@ import fitz  # PyMuPDF
 _TEXT_THRESHOLD = 50  # 抽出テキストがこの文字数未満なら「テキスト層なし」とみなす
 
 # ---- compress_with_text の設定 ----
-BILEVEL_DPI       = 300    # 白黒2値で描き直すときの解像度（小さい本文も読めるよう高め）
-BILEVEL_THRESHOLD = 155    # 0-255。これより明るい画素は白、暗い画素は黒
+TEXT_MAX_DPI      = 200    # 文字ページ：元画像の解像度で描き直す（ただしこの解像度が上限）
+TEXT_MIN_DPI      = 100    #   …元画像の解像度が分からない・低すぎる場合の下限
+TEXT_WHITE_POINT  = 225    # 文字ページ：これより明るい画素（紙の地色）は真っ白にする
+TEXT_BLACK_POINT  = 40     #   …これより暗い画素は真っ黒にし、その間を引き伸ばして文字を濃くする
+TEXT_JPEG_QUALITY = 60     # 文字ページ：JPEG画質
 CLASSIFY_DPI      = 100    # ページ判定用に描画する解像度
 PHOTO_AREA_RATIO  = 0.01   # 中間調または彩色の「面」がページのこの割合を超えたら写真入りとみなす
 REWRITE_DPI_OVER  = 220    # 写真入りページ：これを超える解像度の画像だけ…
@@ -108,23 +111,40 @@ def _is_photo_page(page) -> bool:
     return (mid.histogram()[255] / n > PHOTO_AREA_RATIO) or (col.histogram()[255] / n > PHOTO_AREA_RATIO)
 
 
-def _bilevel_png(page) -> bytes:
-    # ページを高解像度のグレーで描画し、しきい値で白黒2値(1ビット)のPNGにする
+def _native_dpi(page) -> int:
+    # ページ内の画像の実解像度(dpi)を推定（最も高いもの）。分からなければ上限値
+    best = 0
+    for info in page.get_image_info():
+        w_pt = info["bbox"][2] - info["bbox"][0]
+        if w_pt > 0 and info.get("width"):
+            best = max(best, info["width"] / (w_pt / 72))
+    if best <= 0:
+        return TEXT_MAX_DPI
+    return int(max(TEXT_MIN_DPI, min(TEXT_MAX_DPI, round(best))))
+
+
+def _text_gray_jpeg(page) -> bytes:
+    # 文字主体のページを元画像の解像度(上限あり)でグレー描画し、
+    # 地色を白に飛ばし・文字を濃くしてからJPEG化する（輪郭の濃淡を残すのでかすれない）
     from PIL import Image
-    pix = page.get_pixmap(dpi=BILEVEL_DPI, colorspace=fitz.csGRAY)
+    pix = page.get_pixmap(dpi=_native_dpi(page), colorspace=fitz.csGRAY)
     img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-    bw = img.point(lambda v: 255 if v > BILEVEL_THRESHOLD else 0).convert("1", dither=Image.Dither.NONE)
+    span = TEXT_WHITE_POINT - TEXT_BLACK_POINT
+    img = img.point(lambda v: 255 if v > TEXT_WHITE_POINT else max(0, int((v - TEXT_BLACK_POINT) * 255 / span)))
     buf = io.BytesIO()
-    bw.save(buf, "PNG", optimize=True)
+    img.save(buf, "JPEG", quality=TEXT_JPEG_QUALITY, optimize=True)
     return buf.getvalue()
 
 
 def compress_with_text(pdf_bytes: bytes, text: str):
     # ページごとに自動判定して圧縮し、全文を不可視テキスト層として重ねる。
-    # 戻り値: (新しいPDFバイト列, 方式の説明)  例: "白黒2値3p・写真1p" / "元のまま文字のみ（縮まないため）"
+    # 戻り値: (新しいPDFバイト列, 方式の説明)  例: "グレー3p・写真1p" / "元のまま文字のみ（縮まないため）"
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         photo_flags = [_is_photo_page(p) for p in src]
+
+        # 文字ページ用：再圧縮で画質が落ちる前の元画像からグレーJPEGを作っておく
+        gray_jpegs = {i: _text_gray_jpeg(p) for i, p in enumerate(src) if not photo_flags[i]}
 
         # 写真入りページ用：元の画像をその場で再圧縮（解像度上限＋JPEG画質）
         src.rewrite_images(dpi_threshold=REWRITE_DPI_OVER, dpi_target=REWRITE_DPI_TO,
@@ -137,7 +157,7 @@ def compress_with_text(pdf_bytes: bytes, text: str):
                     out.insert_pdf(src, from_page=i, to_page=i)   # 再圧縮済みのページをそのまま使う
                 else:
                     newp = out.new_page(width=page.rect.width, height=page.rect.height)
-                    newp.insert_image(newp.rect, stream=_bilevel_png(page))
+                    newp.insert_image(newp.rect, stream=gray_jpegs[i])
             _add_invisible_text(out, text)
             compressed = out.tobytes(deflate=True, garbage=4)
         finally:
@@ -146,8 +166,8 @@ def compress_with_text(pdf_bytes: bytes, text: str):
         src.close()
 
     n_photo = sum(photo_flags)
-    n_bw = len(photo_flags) - n_photo
-    mode = "・".join(s for s in (f"白黒2値{n_bw}p" if n_bw else "", f"写真{n_photo}p" if n_photo else "") if s)
+    n_gray = len(photo_flags) - n_photo
+    mode = "・".join(s for s in (f"グレー{n_gray}p" if n_gray else "", f"写真{n_photo}p" if n_photo else "") if s)
 
     if len(compressed) < len(pdf_bytes):
         return compressed, mode

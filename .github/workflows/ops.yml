@@ -45,6 +45,9 @@ jobs:
         id: run
         env:
           GBIZ_API_TOKEN: ${{ secrets.GBIZ_API_TOKEN }}   # gBizINFO API（法人マスタの属性付与）。ログに出さないこと
+          DRIVE_OAUTH_CLIENT_ID: ${{ secrets.DRIVE_OAUTH_CLIENT_ID }}           # Google Drive（drive_rename の再処理など）。ログに出さないこと
+          DRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.DRIVE_OAUTH_CLIENT_SECRET }}
+          DRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.DRIVE_OAUTH_REFRESH_TOKEN }}
         run: |
           set -o pipefail
           PYTHONPATH=. PYTHONUNBUFFERED=1 python ops/run.py 2>&1 | tee /tmp/ops_output.log
