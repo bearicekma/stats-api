@@ -29,15 +29,16 @@ async def drive_rename_run():
 
     対象条件:
     - アップロードが数日以内（既定3日）
-    - ファイル名が YYYYMMDD または YYYYMMDD (n) 形式（未処理）
+    - 未処理（処理済みの目印がなく、名前が YYYYMMDD_〜 形式でない）。ファイル名は任意
 
     処理:
-    - PDFを直接Geminiに渡して主要見出しを生成（最大3本を「・」連結）
-    - 「YYYYMMDD_見出し」にリネーム（名前衝突は連番で回避）
+    - PDFを直接Geminiに渡して発行日・主要見出し（最大3本を「・」連結）・全文を取得
+    - 「YYYYMMDD_見出し」にリネーム（日付は 紙面の発行日→ファイル名の8桁→保存日 の順、名前衝突は連番で回避）
+    - 画像PDFは圧縮し全文を不可視テキスト層として埋め込み
     - 失敗があればGmailで通知
 
     レスポンス:
-    - renamed (array) リネームしたファイル: from(str) / to(str)
+    - renamed (array) リネームしたファイル: from(str) / to(str) / date_source(紙面|ファイル名|保存日) / optimized(bool)
     - skipped (int)   対象外でスキップした件数
     - failed  (array) 失敗ファイル: name(str) / reason(str)
     """
@@ -68,7 +69,7 @@ async def drive_rename_files():
     - name (str)         ファイル名
     - created_time (str) アップロード日時(RFC3339)
     - size (int|null)    バイト数
-    - renamed (bool)     リネーム済みか（YYYYMMDD未処理形式でなければtrue）
+    - renamed (bool)     リネーム済みか（処理済みの目印あり、または YYYYMMDD_〜 形式ならtrue）
     - favorite (bool)    お気に入り登録されているか
     """
     try:

@@ -1,8 +1,9 @@
 # Google Drive PDF 自動リネーム処理
 #  - 個人Drive(マイドライブ)の対象フォルダ内PDFを走査
-#  - 数日以内アップロード & 未処理(YYYYMMDD形式)のものを抽出
-#  - PDFを直接Geminiに渡し、1回の呼び出しで「見出し」と「紙面の全文テキスト」をJSONで取得
-#  - 見出しで「YYYYMMDD_見出し」にリネーム
+#  - 数日以内アップロード & 未処理（処理済みの目印なし、かつ YYYYMMDD_ 形式でない）のものを抽出
+#  - PDFを直接Geminiに渡し、1回の呼び出しで「発行日」「見出し」「全文テキスト」をJSONで取得
+#  - 「YYYYMMDD_見出し」にリネーム。日付は 紙面の発行日 → ファイル名の8桁 → Drive保存日(JST) の順で採用
+#  - リネームしたファイルには appProperties renamed=1 を付けて処理済みとする
 #  - 画像PDFなら、JPEG化で圧縮し全文を不可視テキスト層として埋め込んで差し替え（失敗時はリネームのみ）
 #  - 認証は OAuth 2.0 ユーザー委任(refresh_token)、値は環境変数から取得
 #  - Geminiは候補モデルを順に試すフォールバック方式（廃止/日次上限は即次へ）
@@ -46,8 +47,13 @@ UNAVAIL_WAIT      = 5       # 503リトライ前の待機秒数
 GCS_BUCKET_NAME    = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 FAVORITES_GCS_PATH = "drive_rename/favorites.json"
 
-# 未処理ファイル名の判定：YYYYMMDD または YYYYMMDD (n)
-_NAME_PATTERN = re.compile(r"^(\d{8})(?:\s*\(\d+\))?$")
+# 処理済み判定：リネーム後の名前（YYYYMMDD_〜）
+_DONE_PATTERN = re.compile(r"^\d{8}_")
+# ファイル名先頭の8桁日付（予備の日付として使う）
+_NAME_DATE_PATTERN = re.compile(r"^(\d{8})")
+# 採用する日付の下限（これより古い日付は読み間違いとみなす）
+MIN_VALID_DATE = "20000101"
+JST = timezone(timedelta(hours=9))
 
 
 def _get_drive_service():
@@ -77,7 +83,7 @@ def _list_target_pdfs(service):
     while True:
         resp = service.files().list(
             q=q,
-            fields="nextPageToken, files(id, name, createdTime, size)",
+            fields="nextPageToken, files(id, name, createdTime, size, appProperties)",
             pageSize=100,
             pageToken=page_token,
             orderBy="createdTime desc",
@@ -89,11 +95,50 @@ def _list_target_pdfs(service):
     return files
 
 
-def _is_unprocessed(name):
-    # 拡張子を除いた名前が YYYYMMDD / YYYYMMDD (n) なら未処理→日付部分を返す
+def _is_processed(f):
+    # 処理済みか：目印(appProperties)がある、または既に YYYYMMDD_〜 形式の名前
+    props = f.get("appProperties") or {}
+    if props.get("renamed") == "1" or props.get("optimized") == "1":
+        return True
+    base = re.sub(r"\.pdf$", "", f["name"], flags=re.IGNORECASE)
+    return _DONE_PATTERN.match(base) is not None
+
+
+def _valid_date(s):
+    # "YYYYMMDD" が実在する日付で、2000年以降かつ明日(JST)までなら そのまま返す。不正なら None
+    if not s or not re.fullmatch(r"\d{8}", s):
+        return None
+    try:
+        d = datetime.strptime(s, "%Y%m%d").date()
+    except ValueError:
+        return None
+    tomorrow = (datetime.now(JST) + timedelta(days=1)).date()
+    if s < MIN_VALID_DATE or d > tomorrow:
+        return None
+    return s
+
+
+def _normalize_date(raw):
+    # Geminiが返した日付文字列（例 "2026-11-01" "2026年11月1日"）を "YYYYMMDD" に。読めなければ None
+    m = re.search(r"(\d{4})\D{1,3}(\d{1,2})\D{1,3}(\d{1,2})", str(raw or ""))
+    if not m:
+        m = re.search(r"(\d{4})(\d{2})(\d{2})", str(raw or ""))
+    if not m:
+        return None
+    y, mo, d = m.groups()
+    return _valid_date(f"{int(y):04d}{int(mo):02d}{int(d):02d}")
+
+
+def _decide_date(paper_date, name, created_time):
+    # 採用する日付と出どころを返す：紙面の発行日 → ファイル名の8桁 → Drive保存日(JST)
+    if paper_date:
+        return paper_date, "紙面"
     base = re.sub(r"\.pdf$", "", name, flags=re.IGNORECASE)
-    m = _NAME_PATTERN.match(base)
-    return (m.group(1) if m else None)
+    m = _NAME_DATE_PATTERN.match(base)
+    if m and _valid_date(m.group(1)):
+        return m.group(1), "ファイル名"
+    dt = datetime.fromisoformat(created_time.replace("Z", "+00:00")).astimezone(JST)
+    return dt.strftime("%Y%m%d"), "保存日"
 
 
 def _within_recent(created_time):
@@ -122,18 +167,20 @@ def _clean_headline(s):
 
 
 def _parse_analysis(raw):
-    # Geminiの応答(JSON文字列)から (見出しリスト, 全文テキスト) を取り出す。
-    # 出力が途中で切れてJSONが壊れていた場合は、見出しだけ正規表現で救出する（全文は空）。
+    # Geminiの応答(JSON文字列)から (見出しリスト, 全文テキスト, 発行日YYYYMMDD or None) を取り出す。
+    # 出力が途中で切れてJSONが壊れていた場合は、日付と見出しだけ正規表現で救出する（全文は空）。
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
             heads = [_clean_headline(h) for h in (data.get("headlines") or [])]
             heads = [h for h in heads if h][:MAX_HEADLINES]
             text = str(data.get("text") or "")
-            return heads, text
+            return heads, text, _normalize_date(data.get("date"))
     except Exception:
         pass
 
+    dm = re.search(r'"date"\s*:\s*"([^"]*)"', raw)
+    paper_date = _normalize_date(dm.group(1)) if dm else None
     heads = []
     m = re.search(r'"headlines"\s*:\s*\[(.*?)\]', raw, re.S)
     if m:
@@ -145,12 +192,12 @@ def _parse_analysis(raw):
             item = _clean_headline(item)
             if item:
                 heads.append(item)
-    return heads[:MAX_HEADLINES], ""
+    return heads[:MAX_HEADLINES], "", paper_date
 
 
 def _analyze_pdf(pdf_bytes):
-    # PDFを直接Geminiに渡し、1回の呼び出しで見出しと全文テキストを取得する。
-    # 戻り値: ("見出し1・見出し2・見出し3", 全文テキスト(取れなければ空文字))
+    # PDFを直接Geminiに渡し、1回の呼び出しで発行日・見出し・全文テキストを取得する。
+    # 戻り値: ("見出し1・見出し2・見出し3", 全文テキスト(取れなければ空文字), 発行日YYYYMMDD(取れなければNone))
     # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
     # 分次(PerMinute)は短い待機後にリトライ、503(過負荷)も短い待機後にリトライ。
     from google import genai
@@ -159,10 +206,12 @@ def _analyze_pdf(pdf_bytes):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     prompt = (
-        "これは日本経済新聞の紙面PDFです。次のJSONだけを出力してください。\n"
-        '{"headlines": ["見出し1", "見出し2"], "text": "紙面の全文"}\n'
+        "これは日本経済新聞の紙面、または電子版記事のPDFです。次のJSONだけを出力してください。\n"
+        '{"date": "YYYY-MM-DD", "headlines": ["見出し1", "見出し2"], "text": "紙面の全文"}\n'
         "条件:\n"
-        f"- headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本。"
+        "- date: 紙面上部の日付欄、または記事に記載された発行日（掲載日）を西暦で。"
+        "和暦表記なら西暦に直す。PDFの印刷日時・ダウンロード日時は使わない。読み取れなければ空文字\n"
+        f"- headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本（記事が1本だけならその見出し1本）。"
         "各20文字程度まで、記号・改行・番号は付けない\n"
         "- text: 紙面に掲載された記事の見出しと本文を、読み順にできるだけ漏れなく文字起こししたプレーンテキスト"
         "（広告は不要）\n"
@@ -186,11 +235,11 @@ def _analyze_pdf(pdf_bytes):
                 if not raw:
                     last_error = f"{model}: 空応答"
                     break  # 次の候補へ
-                heads, text = _parse_analysis(raw)
+                heads, text, paper_date = _parse_analysis(raw)
                 if not heads:
                     last_error = f"{model}: 見出し抽出できず"
                     break  # 次の候補へ
-                return "・".join(heads), text
+                return "・".join(heads), text, paper_date
 
             except Exception as e:
                 msg = str(e)
@@ -273,23 +322,24 @@ def _unique_name(service, base):
 
 
 def _update_file(service, file_id, new_name, new_bytes):
-    # リネームし、new_bytes があれば中身も差し替える（目印 appProperties も付与）。
+    # リネームし（処理済みの目印 renamed=1 を付与）、new_bytes があれば中身も差し替える（optimized=1 も付与）。
     # 差し替えに失敗したらリネームのみで再試行する。戻り値: 差し替え成功なら None、失敗理由があれば文字列
+    rename_body = {"name": new_name, "appProperties": {"renamed": "1"}}
     if new_bytes:
         try:
             from googleapiclient.http import MediaIoBaseUpload
             media = MediaIoBaseUpload(io.BytesIO(new_bytes), mimetype="application/pdf", resumable=True)
             service.files().update(
                 fileId=file_id,
-                body={"name": new_name, "appProperties": {"optimized": "1"}},
+                body={"name": new_name, "appProperties": {"renamed": "1", "optimized": "1"}},
                 media_body=media,
             ).execute()
             return None
         except Exception as e:
             fail_reason = f"差し替え失敗（リネームのみ）: {e}"
-            service.files().update(fileId=file_id, body={"name": new_name}).execute()
+            service.files().update(fileId=file_id, body=rename_body).execute()
             return fail_reason
-    service.files().update(fileId=file_id, body={"name": new_name}).execute()
+    service.files().update(fileId=file_id, body=rename_body).execute()
     return None
 
 
@@ -354,9 +404,8 @@ def run_drive_rename():
             skipped += 1
             continue
 
-        # 条件2: 未処理（YYYYMMDD形式）か
-        date_part = _is_unprocessed(name)
-        if not date_part:
+        # 条件2: 未処理か（目印なし、かつ YYYYMMDD_〜 形式でない）
+        if _is_processed(f):
             skipped += 1
             continue
 
@@ -367,12 +416,14 @@ def run_drive_rename():
 
         try:
             pdf_bytes = _download_pdf_bytes(service, f["id"])
-            headline, text = _analyze_pdf(pdf_bytes)
+            headline, text, paper_date = _analyze_pdf(pdf_bytes)
             if not headline:
                 failed.append({"name": name, "reason": "見出し生成失敗"})
                 processed += 1
                 continue
 
+            # 日付：紙面の発行日 → ファイル名の8桁 → Drive保存日(JST)
+            date_part, date_source = _decide_date(paper_date, name, f["createdTime"])
             new_base = f"{date_part}_{_sanitize(headline)}"[:MAX_NAME_LEN]
             new_name = _unique_name(service, new_base)
 
@@ -382,7 +433,7 @@ def run_drive_rename():
             if upload_note:
                 note, new_bytes = upload_note, None
 
-            item = {"from": name, "to": new_name, "optimized": bool(new_bytes)}
+            item = {"from": name, "to": new_name, "date_source": date_source, "optimized": bool(new_bytes)}
             if new_bytes:
                 item["size_before"] = len(pdf_bytes)
                 item["size_after"] = len(new_bytes)
@@ -406,13 +457,12 @@ def list_drive_pdfs():
     out = []
     for f in files:
         name = f["name"]
-        base = re.sub(r"\.pdf$", "", name, flags=re.IGNORECASE)
         out.append({
             "id":           f["id"],
             "name":         name,
             "created_time": f["createdTime"],
             "size":         int(f["size"]) if f.get("size") else None,
-            "renamed":      _NAME_PATTERN.match(base) is None,
+            "renamed":      _is_processed(f),
             "favorite":     f["id"] in favorites,
         })
     return out
