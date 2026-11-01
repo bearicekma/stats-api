@@ -1,11 +1,25 @@
-# スキャンPDFの軽量化＋不可視テキスト層の埋め込み（PyMuPDF=fitz のみ使用・依存追加なし）
+# スキャンPDFの軽量化＋不可視テキスト層の埋め込み（PyMuPDF=fitz と Pillow を使用）
 #  - is_scanned_pdf       : 画像主体でテキスト層が無い「スキャンPDF」かを判定
-#  - optimize_scanned_pdf : 各ページを指定dpiで画像化(=軽量化)し、OCR全文を不可視層として重ねる
+#  - compress_with_text   : 【現行】ページごとに自動判定して圧縮し、全文を不可視層として重ねる
+#                             文字主体のページ → 白黒2値(1ビット)で描き直す（大幅に小さくなる）
+#                             写真入りのページ → 元の画像をその場で再圧縮（解像度上限＋JPEG画質）
+#                             それでも元より大きければ → 元のまま全文だけ重ねる
+#  - optimize_scanned_pdf : 【旧方式・未使用】各ページを画像化し直してJPEG化（縮まないことが多い）
 #  - verify_text_layer    : 上書き前チェック（テキストが抽出できるか）
 
+import io
 import fitz  # PyMuPDF
 
 _TEXT_THRESHOLD = 50  # 抽出テキストがこの文字数未満なら「テキスト層なし」とみなす
+
+# ---- compress_with_text の設定 ----
+BILEVEL_DPI       = 300    # 白黒2値で描き直すときの解像度（小さい本文も読めるよう高め）
+BILEVEL_THRESHOLD = 155    # 0-255。これより明るい画素は白、暗い画素は黒
+CLASSIFY_DPI      = 100    # ページ判定用に描画する解像度
+PHOTO_AREA_RATIO  = 0.01   # 中間調または彩色の「面」がページのこの割合を超えたら写真入りとみなす
+REWRITE_DPI_OVER  = 220    # 写真入りページ：これを超える解像度の画像だけ…
+REWRITE_DPI_TO    = 200    #   …この解像度に下げる
+REWRITE_QUALITY   = 75     # 写真入りページ：JPEG画質
 
 
 def is_scanned_pdf(pdf_bytes: bytes) -> bool:
@@ -66,3 +80,82 @@ def verify_text_layer(pdf_bytes: bytes, min_chars: int = 20) -> bool:
         return ok and got >= min_chars
     except Exception:
         return False
+
+
+def _add_invisible_text(doc, text: str):
+    # 全文をページ数で均等に分け、各ページに不可視テキスト(描画モード3)として重ねる
+    text = (text or "").strip()
+    if not text or doc.page_count == 0:
+        return
+    chunk = max(1, -(-len(text) // doc.page_count))  # 切り上げ分割
+    for i, page in enumerate(doc):
+        part = text[i * chunk:(i + 1) * chunk]
+        if part:
+            page.insert_textbox(page.rect, part,
+                                fontsize=_pick_fontsize(len(part)),
+                                fontname="japan", render_mode=3)
+
+
+def _is_photo_page(page) -> bool:
+    # 低解像度で描画し、中間調(灰色)または彩色の「面」があるかで写真入りページかを判定。
+    # 細い文字の縁にも中間調は出るため、収縮フィルタで細い部分を消してから面積を測る。
+    from PIL import Image, ImageFilter
+    pix = page.get_pixmap(dpi=CLASSIFY_DPI)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    n = img.width * img.height
+    mid = img.convert("L").point(lambda v: 255 if 60 < v < 200 else 0).filter(ImageFilter.MinFilter(5))
+    col = img.convert("HSV").getchannel("S").point(lambda s: 255 if s > 60 else 0).filter(ImageFilter.MinFilter(5))
+    return (mid.histogram()[255] / n > PHOTO_AREA_RATIO) or (col.histogram()[255] / n > PHOTO_AREA_RATIO)
+
+
+def _bilevel_png(page) -> bytes:
+    # ページを高解像度のグレーで描画し、しきい値で白黒2値(1ビット)のPNGにする
+    from PIL import Image
+    pix = page.get_pixmap(dpi=BILEVEL_DPI, colorspace=fitz.csGRAY)
+    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+    bw = img.point(lambda v: 255 if v > BILEVEL_THRESHOLD else 0).convert("1", dither=Image.Dither.NONE)
+    buf = io.BytesIO()
+    bw.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+def compress_with_text(pdf_bytes: bytes, text: str):
+    # ページごとに自動判定して圧縮し、全文を不可視テキスト層として重ねる。
+    # 戻り値: (新しいPDFバイト列, 方式の説明)  例: "白黒2値3p・写真1p" / "元のまま文字のみ（縮まないため）"
+    src = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        photo_flags = [_is_photo_page(p) for p in src]
+
+        # 写真入りページ用：元の画像をその場で再圧縮（解像度上限＋JPEG画質）
+        src.rewrite_images(dpi_threshold=REWRITE_DPI_OVER, dpi_target=REWRITE_DPI_TO,
+                           quality=REWRITE_QUALITY)
+
+        out = fitz.open()
+        try:
+            for i, page in enumerate(src):
+                if photo_flags[i]:
+                    out.insert_pdf(src, from_page=i, to_page=i)   # 再圧縮済みのページをそのまま使う
+                else:
+                    newp = out.new_page(width=page.rect.width, height=page.rect.height)
+                    newp.insert_image(newp.rect, stream=_bilevel_png(page))
+            _add_invisible_text(out, text)
+            compressed = out.tobytes(deflate=True, garbage=4)
+        finally:
+            out.close()
+    finally:
+        src.close()
+
+    n_photo = sum(photo_flags)
+    n_bw = len(photo_flags) - n_photo
+    mode = "・".join(s for s in (f"白黒2値{n_bw}p" if n_bw else "", f"写真{n_photo}p" if n_photo else "") if s)
+
+    if len(compressed) < len(pdf_bytes):
+        return compressed, mode
+
+    # 元より大きくなった → 画像は元のまま、全文だけ重ねる（検索はできるようにする）
+    orig = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        _add_invisible_text(orig, text)
+        return orig.tobytes(deflate=True, garbage=4), "元のまま文字のみ（縮まないため）"
+    finally:
+        orig.close()

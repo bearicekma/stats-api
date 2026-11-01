@@ -4,7 +4,8 @@
 #  - PDFを直接Geminiに渡し、1回の呼び出しで「発行日」「見出し」「全文テキスト」をJSONで取得
 #  - 「YYYYMMDD_見出し」にリネーム。日付は 紙面の発行日 → ファイル名の8桁 → Drive保存日(JST) の順で採用
 #  - リネームしたファイルには appProperties renamed=1 を付けて処理済みとする
-#  - 画像PDFなら、JPEG化で圧縮し全文を不可視テキスト層として埋め込んで差し替え（失敗時はリネームのみ）
+#  - 画像PDFなら、ページごとに自動判定して圧縮（文字主体=白黒2値／写真入り=元画像を再圧縮）し、
+#    全文を不可視テキスト層として埋め込んで差し替え（縮まなければ元画像のまま文字のみ、失敗時はリネームのみ）
 #  - 認証は OAuth 2.0 ユーザー委任(refresh_token)、値は環境変数から取得
 #  - Geminiは候補モデルを順に試すフォールバック方式（廃止/日次上限は即次へ）
 #  - 候補モデルは環境変数 GEMINI_MODELS（カンマ区切り）で上書き可能
@@ -280,19 +281,19 @@ def _analyze_pdf(pdf_bytes):
 
 
 def _try_optimize(pdf_bytes, text):
-    # 画像PDFなら「JPEG化で圧縮＋全文の不可視テキスト層」を作る。
-    # 戻り値: (新しいPDFバイト列, None)=成功 / (None, 理由)=対象外または失敗（その場合はリネームのみ）
+    # 画像PDFなら「ページごとに自動判定して圧縮（文字主体=白黒2値／写真入り=元画像を再圧縮）＋全文の不可視テキスト層」を作る。
+    # 戻り値: (新しいPDFバイト列, 方式の説明)=成功 / (None, 理由)=対象外または失敗（その場合はリネームのみ）
     if len((text or "").strip()) < OPT_MIN_TEXT_CHARS:
         return None, "全文テキスト未取得（圧縮せず）"
     try:
-        from app.pdf_optimize import is_scanned_pdf, optimize_scanned_pdf, verify_text_layer
+        from app.pdf_optimize import is_scanned_pdf, compress_with_text, verify_text_layer
 
         if not is_scanned_pdf(pdf_bytes):
             return None, "既にテキスト層あり（圧縮せず）"
-        new_bytes = optimize_scanned_pdf(pdf_bytes, text)
+        new_bytes, mode = compress_with_text(pdf_bytes, text)
         if not verify_text_layer(new_bytes):
             return None, "検証NG（テキスト層を抽出できず）"
-        return new_bytes, None
+        return new_bytes, f"圧縮: {mode}"
     except Exception as e:
         return None, f"圧縮失敗: {e}"
 

@@ -16,6 +16,7 @@ orjson
 yfinance
 google-cloud-vision
 pymupdf
+Pillow
 python-multipart
 google-genai
 yt-dlp
