@@ -230,7 +230,9 @@ async def estat_meta(stats_data_id: str, request: Request):
     # フィルタ条件（クエリパラメータ）を取り出す
     applied_filters = dict(request.query_params)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    # 数千万件規模の統計表ではメタ情報・件数照会とも応答が遅いため余裕を持たせる
+    # （limit=1でもe-Statが絞り込みを全体評価するため30秒では足りないケースがある）
+    async with httpx.AsyncClient(timeout=120) as client:
 
         # パラメータ一覧を取得する（絞り込みと無関係なため全件のまま）
         meta_response = await get_with_retry(
