@@ -2,7 +2,7 @@
 #  - 個人Drive(マイドライブ)の対象フォルダ内PDFを走査
 #  - 数日以内アップロード & 未処理（処理済みの目印なし、かつ YYYYMMDD_ 形式でない）のものを抽出
 #  - PDFを直接Geminiに渡し、1回の呼び出しで「発行日」「見出し」「全文テキスト」をJSONで取得
-#  - 「YYYYMMDD_見出し」にリネーム。日付は 紙面の発行日 → ファイル名の8桁 → Drive保存日(JST) の順で採用
+#  - 「YYYYMMDD_【シリーズ名（回）】見出し」にリネーム（シリーズ・定番コラムでなければ【】なし）。日付は 紙面の発行日 → ファイル名の8桁 → Drive保存日(JST) の順で採用
 #  - リネームしたファイルには appProperties renamed=1 を付けて処理済みとする
 #  - 画像PDFなら、ページごとに自動判定して圧縮（文字主体=グレースケール／写真入り=元画像を再圧縮）し、
 #    全文を不可視テキスト層として埋め込んで差し替え（縮まなければ元画像のまま文字のみ、失敗時はリネームのみ）
@@ -167,21 +167,64 @@ def _clean_headline(s):
     return str(s).strip(" 　・\t\r\n")
 
 
+def _clean_series(s):
+    # シリーズ名・回の前後の空白や括弧、【】を除去（【】はファイル名側で付けるため）
+    s = re.sub(r"[【】\[\]]", "", str(s or ""))
+    return s.strip(" 　・\t\r\n")
+
+
+def _compose_title(heads, series, part):
+    # ファイル名の日付より後ろを組み立てる：「【シリーズ名（回）】見出し1・見出し2」
+    # 見出しに同じシリーズ名（と回）が入っていたら取り除き、空になった見出しは捨てる
+    part = part.strip("()（）") if part else ""
+    if not series:
+        return "・".join(heads)
+
+    def _loose(s):
+        # 空白の有無を問わず一致する正規表現にする
+        return r"\s*".join(map(re.escape, re.sub(r"\s", "", s)))
+
+    # シリーズ名の全体と、前の語を省いた形（例「迫真 さまよう夫婦」→「さまよう夫婦」）の両方を消す
+    tokens = series.split()
+    names = [" ".join(tokens[i:]) for i in range(len(tokens))] or [series]
+    part_pat = (r"(?:\s*[（(]?\s*" + _loose(part) + r"\s*[)）]?)?") if part else ""
+    stripped = []
+    for h in heads:
+        for nm in names:
+            h = re.sub(_loose(nm) + part_pat, "", h)
+        h = h.strip(" 　・、，,：:\t")
+        if len(h) >= 2:
+            stripped.append(h)
+    label = f"【{series}（{part}）】" if part else f"【{series}】"
+    return label + "・".join(stripped)   # 見出しが全部シリーズ名だった場合は【】だけになる
+
+
 def _parse_analysis(raw):
-    # Geminiの応答(JSON文字列)から (見出しリスト, 全文テキスト, 発行日YYYYMMDD or None) を取り出す。
-    # 出力が途中で切れてJSONが壊れていた場合は、日付と見出しだけ正規表現で救出する（全文は空）。
+    # Geminiの応答(JSON文字列)から (見出しリスト, 全文テキスト, 発行日YYYYMMDD or None, シリーズ名, 回) を取り出す。
+    # 出力が途中で切れてJSONが壊れていた場合は、日付・シリーズ・見出しだけ正規表現で救出する（全文は空）。
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
             heads = [_clean_headline(h) for h in (data.get("headlines") or [])]
             heads = [h for h in heads if h][:MAX_HEADLINES]
             text = str(data.get("text") or "")
-            return heads, text, _normalize_date(data.get("date"))
+            return (heads, text, _normalize_date(data.get("date")),
+                    _clean_series(data.get("series")), _clean_series(data.get("series_part")))
     except Exception:
         pass
 
-    dm = re.search(r'"date"\s*:\s*"([^"]*)"', raw)
-    paper_date = _normalize_date(dm.group(1)) if dm else None
+    def _field(key):
+        # 壊れたJSONから "key": "値" を取り出す
+        fm = re.search(r'"' + key + r'"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+        if not fm:
+            return ""
+        try:
+            return json.loads('"' + fm.group(1) + '"')
+        except Exception:
+            return fm.group(1)
+
+    paper_date = _normalize_date(_field("date"))
+    series, part = _clean_series(_field("series")), _clean_series(_field("series_part"))
     heads = []
     m = re.search(r'"headlines"\s*:\s*\[(.*?)\]', raw, re.S)
     if m:
@@ -193,12 +236,13 @@ def _parse_analysis(raw):
             item = _clean_headline(item)
             if item:
                 heads.append(item)
-    return heads[:MAX_HEADLINES], "", paper_date
+    return heads[:MAX_HEADLINES], "", paper_date, series, part
 
 
 def _analyze_pdf(pdf_bytes):
     # PDFを直接Geminiに渡し、1回の呼び出しで発行日・見出し・全文テキストを取得する。
-    # 戻り値: ("見出し1・見出し2・見出し3", 全文テキスト(取れなければ空文字), 発行日YYYYMMDD(取れなければNone))
+    # 戻り値: ("【シリーズ名（回）】見出し1・見出し2・見出し3", 全文テキスト(取れなければ空文字), 発行日YYYYMMDD(取れなければNone))
+    #         シリーズ・定番コラムでなければ【】は付かない
     # 候補モデルを順に試す。廃止(limit:0)・日次上限(PerDay)は即次へ、
     # 分次(PerMinute)は短い待機後にリトライ、503(過負荷)も短い待機後にリトライ。
     from google import genai
@@ -208,12 +252,17 @@ def _analyze_pdf(pdf_bytes):
 
     prompt = (
         "これは日本経済新聞の紙面、または電子版記事のPDFです。次のJSONだけを出力してください。\n"
-        '{"date": "YYYY-MM-DD", "headlines": ["見出し1", "見出し2"], "text": "紙面の全文"}\n'
+        '{"date": "YYYY-MM-DD", "series": "", "series_part": "", "headlines": ["見出し1", "見出し2"], "text": "紙面の全文"}\n'
         "条件:\n"
         "- date: 紙面上部の日付欄、または記事に記載された発行日（掲載日）を西暦で。"
         "和暦表記なら西暦に直す。PDFの印刷日時・ダウンロード日時は使わない。読み取れなければ空文字\n"
+        "- series: 主要な記事（headlinesの1本目）が、連載・シリーズ・定番コラムの一部である場合、その名称。"
+        "ロゴやカット、見出し脇の小さな表記に示されることが多い"
+        "（例: データで読む地域再生、迫真 さまよう夫婦、きょうのことば、経済教室、大機小機、春秋、私見卓見）。"
+        "該当しなければ空文字\n"
+        "- series_part: その連載の回の表記（例: 上、中、下、①、3、第3回）。括弧は付けない。無ければ空文字\n"
         f"- headlines: 主要な記事の見出しを重要な順に最大{MAX_HEADLINES}本（記事が1本だけならその見出し1本）。"
-        "各20文字程度まで、記号・改行・番号は付けない\n"
+        "各20文字程度まで、記号・改行・番号は付けない。シリーズ名・回の表記は含めない\n"
         "- text: 紙面に掲載された記事の見出しと本文を、読み順にできるだけ漏れなく文字起こししたプレーンテキスト"
         "（広告は不要）\n"
         "- JSON以外の文字は一切出力しない"
@@ -236,11 +285,11 @@ def _analyze_pdf(pdf_bytes):
                 if not raw:
                     last_error = f"{model}: 空応答"
                     break  # 次の候補へ
-                heads, text, paper_date = _parse_analysis(raw)
+                heads, text, paper_date, series, part = _parse_analysis(raw)
                 if not heads:
                     last_error = f"{model}: 見出し抽出できず"
                     break  # 次の候補へ
-                return "・".join(heads), text, paper_date
+                return _compose_title(heads, series, part), text, paper_date
 
             except Exception as e:
                 msg = str(e)
