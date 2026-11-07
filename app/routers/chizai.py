@@ -17,7 +17,7 @@ router = APIRouter(prefix="/chizai", tags=["地方財政状況調査"])
 
 BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data")
 PREFIX = "chizai"
-KUBUN_LIST = ["pref"]   # 市町村分を取り込んだら "city" を追加
+KUBUN_LIST = ["pref", "city"]   # pref=都道府県分 / city=市町村分（一部事務組合等を含む）
 ITEMS_CSV = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chizai_items.csv")
 _items_cache = None
 
@@ -48,6 +48,32 @@ def _download(path: str):
     return tmp_path
 
 
+def _download_many(paths: list) -> list:
+    # 複数のParquet（市町村分の 表番号/都道府県/年度 ごとのファイル）を並列で一時ファイルに落とす
+    from concurrent.futures import ThreadPoolExecutor
+    bucket = storage.Client().bucket(BUCKET_NAME)
+
+    def one(path):
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            tmp_path = tmp.name
+        bucket.blob(path).download_to_filename(tmp_path)
+        return tmp_path
+    with ThreadPoolExecutor(16) as ex:
+        return list(ex.map(one, paths))
+
+
+def _city_paths(hyo: str, prefs: list, nendo_from, nendo_to) -> list:
+    # 市町村分：指定の都道府県・年度範囲にあるファイルの一覧
+    client = storage.Client()
+    out = []
+    for p in prefs:
+        for b in client.list_blobs(BUCKET_NAME, prefix=f"{PREFIX}/city/{hyo}/{p}/"):
+            m = re.search(r"/(\d{4})\.parquet$", b.name)
+            if m and (nendo_from is None or int(m.group(1)) >= nendo_from) and (nendo_to is None or int(m.group(1)) <= nendo_to):
+                out.append(b.name)
+    return sorted(out)
+
+
 def _codes(text, width: int) -> list[str]:
     # "1,2,03" → ["01","02","03"]（カンマ区切り・0埋め）
     if not text:
@@ -65,12 +91,16 @@ def _name_list(text) -> list[str]:
 def _query(path: str, where: list[str], params: list, order: str, limit, fmt: str, label: str, names: list = None, partial: bool = False, items=None):
     # Parquetを DuckDB で絞り込み、JSON または CSV で返す共通処理
     # names: [(列名, 正規化名称リスト)]。表記ゆれ（空白・中黒・名称中の年度）を無視して名称で絞り込む
-    tmp_path = None
+    tmp_paths = []
     try:
-        tmp_path = _download(path)
-        if tmp_path is None:
+        if isinstance(path, list):
+            tmp_paths = _download_many(path) if path else []
+        else:
+            t = _download(path)
+            tmp_paths = [t] if t else []
+        if not tmp_paths:
             return JSONResponse(status_code=404, content={"error": f"データがありません: {label}", "hint": "表番号は /chizai/tables で確認できます"})
-        src = f"read_parquet('{tmp_path}')"
+        src = "read_parquet([" + ",".join(f"'{t}'" for t in tmp_paths) + "], union_by_name=true)"
         con = duckdb.connect()
         where, params = list(where), list(params)
         for col, targets in names or []:
@@ -116,8 +146,9 @@ def _query(path: str, where: list[str], params: list, order: str, limit, fmt: st
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for t in tmp_paths:
+            if t and os.path.exists(t):
+                os.remove(t)
 
 
 def _check(kubun: str, hyo: str = None):
@@ -131,7 +162,7 @@ def _check(kubun: str, hyo: str = None):
 
 @router.get("/tables", summary="表の一覧")
 async def get_tables(
-    kubun: str = Query("pref", description="pref=都道府県分"),
+    kubun: str = Query("pref", description="pref=都道府県分 / city=市町村分（一部事務組合等を含む）"),
     hyo: str = Query(None, description="表番号で絞込。例: 46"),
     nendo: int = Query(None, description="この決算年度（西暦）に収録がある表だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
@@ -165,7 +196,7 @@ async def get_tables(
 
 @router.get("/meta", summary="表の行・列の一覧")
 async def get_meta(
-    kubun: str = Query("pref", description="pref=都道府県分"),
+    kubun: str = Query("pref", description="pref=都道府県分 / city=市町村分（一部事務組合等を含む）"),
     hyo: str = Query(None, description="表番号。例: 02（決算収支の状況）。省略すると表の一覧（/chizai/tables と同じ）を返す"),
     nendo: int = Query(None, description="この決算年度（西暦）に収録がある行・列だけ返す。例: 2024"),
     format: str = Query("json", description="json（既定）または csv"),
@@ -194,11 +225,11 @@ async def get_meta(
 
 @router.get("/data", summary="調査表データ（縦持ち）")
 async def get_data(
-    kubun: str = Query("pref", description="pref=都道府県分"),
+    kubun: str = Query("pref", description="pref=都道府県分 / city=市町村分（一部事務組合等を含む）"),
     hyo: str = Query(..., description="表番号。例: 02（決算収支の状況）。一覧は /chizai/tables"),
     nendo_from: int = Query(None, description="決算年度（西暦）の開始。例: 2018"),
     nendo_to: int = Query(None, description="決算年度（西暦）の終了。例: 2024"),
-    dantai: str = Query(None, description="団体コード6桁 または 市区町村コード5桁。カンマ区切りで複数可。例: 20000（長野県）、00000（全国）"),
+    dantai: str = Query(None, description="団体コード6桁 または 市区町村コード5桁。カンマ区切りで複数可。例: 20000（長野県）、00000（全国）。市町村分（kubun=city）は必須で、都道府県コード2桁（例: 20）でその県内の全団体"),
     gyo: str = Query(None, description="行番号。カンマ区切りで複数可。例: 01"),
     retsu: str = Query(None, description="列番号。カンマ区切りで複数可。例: 001,005"),
     gyo_name: str = Query(None, description="行名称で絞込（完全一致。空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行"),
@@ -229,6 +260,11 @@ async def get_data(
     決算年度 / 団体コード（6桁）/ 市区町村コード（5桁、マスタ `_M_city`・`_M_pref` と結合用）/
     都道府県名 / 団体名 / 団体区分 / 表番号 / 表名称 / 行番号 / 行名称 / 列番号 / 列名称 / 値
     （項目対応表のある表は、末尾に 項目コード / 項目名 / 指標名 が付く）
+
+    ### 市町村分（kubun=city）
+    市町村・特別区・一部事務組合等の調査表（1989年度〜）。`dantai` が必須です（例: `dantai=20`＝長野県内の全団体、`dantai=202011`＝長野市）。
+    表番号・様式は都道府県分と別体系で、項目対応表はまだありません（`gyo_name`・`retsu_name` で絞り込んでください）。
+    例: 長野県内市町村の決算収支 `?kubun=city&hyo=02&dantai=20&gyo=01&nendo_from=2020`
 
     ### 項目対応表
     年度による番号の入れ替わり・改名・同名項目（「その他」など）を整理した対応表です。現在の対象: 表01〜13・15・16・18〜25・29〜31・33・34・36・37・39〜41・45・50・51・90・91・46・47・53〜66（2011年度〜）。
@@ -265,10 +301,17 @@ async def get_data(
         params.append(nendo_to)
 
     codes = [c.strip() for c in (dantai or "").split(",") if c.strip()]
+    if kubun == "city" and not codes:
+        return JSONResponse(status_code=400, content={"error": "市町村分（kubun=city）は dantai の指定が必要です",
+                                                      "hint": "団体コード6桁・市区町村コード5桁、または都道府県コード2桁（例: 20 = 長野県内の全団体）"})
     if codes:
+        c2 = [c for c in codes if len(c) <= 2]
         c6 = [c for c in codes if len(c) == 6]
-        c5 = [c for c in codes if len(c) != 6]
+        c5 = [c for c in codes if 2 < len(c) < 6]
         cond = []
+        if c2:
+            cond.append("(" + " OR ".join("団体コード LIKE ?" for _ in c2) + ")")
+            params.extend([c.zfill(2) + "%" for c in c2])
         if c6:
             cond.append(f"団体コード IN ({','.join('?' * len(c6))})")
             params.extend(c6)
@@ -307,12 +350,19 @@ async def get_data(
             return JSONResponse(status_code=400, content={"error": f"指標がありません: {unknown}", "hint": f"/chizai/items?hyo={h} の 軸=列 を確認してください"})
         where.append(f"指標名 IN ({','.join('?' * len(ms))})")
         params.extend(ms)
-    return _query(f"{PREFIX}/{kubun}/{h}/data.parquet", where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"), items=items)
+    if kubun == "city":
+        prefs = sorted({c.zfill(2)[:2] if len(c) <= 2 else c.zfill(6 if len(c) == 6 else 5)[:2] for c in codes})
+        src = _city_paths(h, prefs, nendo_from, nendo_to)
+        if not src:
+            return JSONResponse(status_code=404, content={"error": f"データがありません: chizai/city/{h}（都道府県 {prefs}）", "hint": "表番号は /chizai/tables?kubun=city で確認できます"})
+    else:
+        src = f"{PREFIX}/{kubun}/{h}/data.parquet"
+    return _query(src, where, params, "決算年度, 団体コード, 行番号, 列番号", limit, format, f"chizai/{kubun}/{h}", names, partial=(name_match == "partial"), items=items)
 
 
 @router.get("/items", summary="項目対応表")
 async def get_items(
-    kubun: str = Query("pref", description="pref=都道府県分"),
+    kubun: str = Query("pref", description="pref=都道府県分 / city=市町村分（一部事務組合等を含む）"),
     hyo: str = Query(..., description="表番号。現在の対象: 01〜13・15・16・18〜25・29〜31・33・34・36・37・39〜41・45〜47・50・51・53〜66・90・91"),
     detail: bool = Query(False, description="true で年度範囲ごとの行番号・列番号・元の名称まで返す"),
     format: str = Query("json", description="json（既定）または csv"),

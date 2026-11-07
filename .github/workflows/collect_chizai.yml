@@ -33,7 +33,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # 初回（full）は約1,800ファイルで1〜2時間の見込み
+    timeout-minutes: 340   # 都道府県分の初回（full）は1〜2時間。市町村分は数回に分けて実行する
 
     steps:
       - name: リポジトリをチェックアウト
@@ -57,6 +57,7 @@ jobs:
         id: run
         env:
           ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
+          CHIZAI_TIME_BUDGET_MIN: '220'   # 市町村分：この時間を過ぎたら新しい年に手を付けず終える（続きは update で再実行）
         run: |
           set -o pipefail
           PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} ${{ github.event.inputs.kubun || 'pref' }} 2>&1 | tee /tmp/chizai_output.log

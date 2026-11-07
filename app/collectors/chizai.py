@@ -9,6 +9,9 @@
 #   chizai/{kubun}/_tables.parquet         表の一覧（/chizai/tables 用）
 #   chizai/{kubun}/_meta.parquet           行・列の一覧（/chizai/meta 用）
 #   chizai/{kubun}/_state.json             取込済みCSVの更新日（差分更新用）
+#   市町村分（city）は団体数が多く1つのParquetでは大きすぎるため、表番号×都道府県×年度に分けて保存する:
+#   chizai/city/{表番号}/{都道府県コード2桁}/{決算年度}.parquet（全国計は 00）
+#   chizai/city/_index/{決算年度}.parquet  索引用の名称の一覧（年度ごと。_tables・_meta はこれから作る）
 
 import io
 import json
@@ -83,6 +86,7 @@ def fetch_catalog(kubun: str) -> list[dict]:
                 if word not in ds_text or "調査表" not in ds_text:
                     continue
                 cat_id = str(cat.get("@id", ""))
+                ym = re.search(r"年次_(\d{4})年", ds_text)
                 for res in _as_list(cat.get("RESOURCES", {}).get("RESOURCE")):
                     if str(res.get("FORMAT", "")).upper() != "CSV":
                         continue
@@ -91,6 +95,7 @@ def fetch_catalog(kubun: str) -> list[dict]:
                         "name":     _text(res.get("TITLE")),
                         "url":      str(res.get("URL", "")),
                         "modified": str(res.get("LAST_MODIFIED_DATE", "")),
+                        "year":     int(ym.group(1)) if ym else 0,
                     })
 
             nxt = inf.get("RESULT_INF", {}).get("NEXT_KEY")
@@ -246,11 +251,18 @@ def _group_names(rows: pd.DataFrame, merge_contained: bool) -> list[dict]:
     return sorted(out, key=lambda r: r["決算年度_最初"])
 
 
+def _count(df: pd.DataFrame, keys: list) -> pd.DataFrame:
+    # 件数を数える。列「_w」があればその合計（名称の一覧に件数を持たせた場合）
+    if "_w" in df.columns:
+        return df.groupby(keys, dropna=False)["_w"].sum().reset_index(name="件数")
+    return df.groupby(keys, dropna=False).size().reset_index(name="件数")
+
+
 def _table_groups(df: pd.DataFrame) -> list[dict]:
     # 1つの表番号の中で、表名称を「同じ表」の塊にまとめる。次のどちらかなら同じ表とみなす
     #   (1) 正規化した名称が一致する、一方が他方に含まれる（省略形）、または「その○」の番号だけが違う
     #   (2) 行・列の項目名が半分以上重なる（「その3」→「その2」の繰り上げなど、改名だけのもの）
-    nm = df.groupby(["決算年度", "表名称"], dropna=False).size().reset_index(name="件数")
+    nm = _count(df, ["決算年度", "表名称"])
     nm["キー"] = nm["表名称"].map(_norm)
     keys = list(dict.fromkeys(nm["キー"]))
     parent = {k: k for k in keys}
@@ -310,7 +322,7 @@ def _index_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     parts = []
     for kind, no, name in [("行", "行番号", "行名称"), ("列", "列番号", "列名称")]:
-        u = df[df[name].notna()].groupby([no, "決算年度", name]).size().reset_index(name="件数").rename(columns={name: "名称"})
+        u = _count(df[df[name].notna()], [no, "決算年度", name]).rename(columns={name: "名称"})
         for num, g in u.groupby(no):
             for r in _group_names(g, merge_contained=False):
                 r.pop("件数")
@@ -377,13 +389,17 @@ def run(kubun: str = "pref", mode: str = "dryrun") -> int:
     #       reindex=保存済みデータから表一覧・行列一覧だけ作り直す
     if mode not in ("dryrun", "full", "update", "reindex", "fixcont_dryrun", "fixcont"):
         raise ValueError(f"mode は dryrun / full / update / reindex / fixcont_dryrun / fixcont: {mode}")
-    if mode == "reindex":
+    if mode == "reindex" and kubun != "city":
         return reindex(kubun)
     if mode in ("fixcont_dryrun", "fixcont"):
         return fix_saved_continuation(kubun, write=(mode == "fixcont"))
 
+    if kubun == "city" and mode == "reindex":
+        return reindex_city()
     items = fetch_catalog(kubun)
     print(f"📋 CSVリソース {len(items)}件 / カタログ {len({it['catalog'] for it in items})}件", flush=True)
+    if kubun == "city" and mode in ("full", "update"):
+        return run_city(items, mode)
 
     if mode == "dryrun":
         per_cat = pd.Series([it["catalog"] for it in items]).value_counts().sort_index()
@@ -472,3 +488,113 @@ def run(kubun: str = "pref", mode: str = "dryrun") -> int:
     if errors:
         raise RuntimeError(f"{len(errors)}件のCSVが取り込めませんでした（上記ログ参照）")
     return len(done)
+
+
+# ── 市町村分（city） ──────────────────────────────────────
+# 団体数が約3,000（一部事務組合等を含む）と多いため、表番号×都道府県×年度に分けて保存する。
+# 全ファイル（約4,900件）は1回の実行時間に収まらないため、年（カタログ）単位で取り込んで進み具合を _state.json に残し、
+# 時間の上限に近づいたら途中で終える。続きは update でもう一度実行する（新しい年から順に取り込む）
+
+CITY_BUDGET_MIN = int(os.environ.get("CHIZAI_TIME_BUDGET_MIN", "270"))   # 1回の実行で新しいカタログに手を付ける時間の上限（分）
+NAME_COLS = ["決算年度", "表番号", "表名称", "行番号", "行名称", "列番号", "列名称"]
+
+
+def _city_path(hyo: str, pref: str, year: int) -> str:
+    return f"{PREFIX}/city/{hyo}/{pref}/{year}.parquet"
+
+
+def run_city(items: list, mode: str) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+    t0 = time.time()
+    state_path = f"{PREFIX}/city/_state.json"
+    state = {} if mode == "full" else _load_json(state_path)
+    cats = {}
+    for it in items:
+        cats.setdefault(it["catalog"], []).append(it)
+    changed = [c for c, its in cats.items() if any(state.get(it["url"]) != it["modified"] for it in its)]
+    changed.sort(key=lambda c: -max(it["year"] for it in cats[c]))   # 新しい年から
+    print(f"🎯 取込対象 {len(changed)}カタログ（{sum(len(cats[c]) for c in changed)}ファイル）/ 時間の上限 {CITY_BUDGET_MIN}分", flush=True)
+    errors, done = [], 0
+    for ci, cid in enumerate(changed, 1):
+        if (time.time() - t0) / 60 > CITY_BUDGET_MIN:
+            print(f"⏸ 時間の上限に達したため終了。残り {len(changed) - ci + 1}カタログは次回の update で取り込む", flush=True)
+            break
+        work = tempfile.mkdtemp(prefix="chizai_city_")
+        try:
+            names, ok_urls = [], []
+            for i, it in enumerate(cats[cid], 1):
+                try:
+                    with httpx.Client(timeout=600, follow_redirects=True) as client:
+                        r = client.get(it["url"])
+                        r.raise_for_status()
+                    df = normalize(r.content)
+                    del r
+                    for (hyo, pref), g in df.groupby([df["表番号"], df["団体コード"].str[:2]]):
+                        os.makedirs(f"{work}/{hyo}/{pref}", exist_ok=True)
+                        g.to_parquet(f"{work}/{hyo}/{pref}/{i:04d}.parquet", index=False)
+                    names.append(df.groupby(NAME_COLS, dropna=False).size().reset_index(name="_w"))
+                    ok_urls.append(it)
+                    print(f"[{ci}/{len(changed)} {it['year']}年 {i}/{len(cats[cid])}] OK {it['name']} {len(df)}件", flush=True)
+                    del df
+                except Exception as e:
+                    errors.append(f"{it['name']} {it['url']}: {type(e).__name__}: {e}")
+                    print(f"[{ci}/{len(changed)} {i}/{len(cats[cid])}] NG {errors[-1]}", flush=True)
+                time.sleep(FILE_INTERVAL)
+
+            # 表番号×都道府県ごとに結合し、年度ごとのファイルにして並列で保存する
+            def save(hp):
+                hyo, pref = hp
+                d = pd.concat([pd.read_parquet(f"{work}/{hyo}/{pref}/{f}") for f in sorted(os.listdir(f"{work}/{hyo}/{pref}"))], ignore_index=True)
+                d = d.drop_duplicates()
+                dup = d.duplicated(subset=["決算年度", "団体コード", "行番号", "列番号"], keep=False)
+                msg = f"⚠️ 表{hyo} {pref}: キー重複 {int(dup.sum())}件" if dup.any() else None
+                n = 0
+                for y, g in d.groupby("決算年度"):
+                    buf = io.BytesIO()
+                    g.sort_values(SORT_COLS).to_parquet(buf, index=False)
+                    buf.seek(0)
+                    _bucket().blob(_city_path(hyo, pref, int(y))).upload_from_file(buf, content_type="application/octet-stream")
+                    n += len(g)
+                return msg, n
+            parts = [(h, p) for h in sorted(os.listdir(work)) for p in sorted(os.listdir(f"{work}/{h}"))]
+            with ThreadPoolExecutor(16) as ex:
+                res = list(ex.map(save, parts))
+            for msg, _ in res:
+                if msg:
+                    print(msg, flush=True)
+            if names:
+                nm = pd.concat(names, ignore_index=True).groupby(NAME_COLS, dropna=False)["_w"].sum().reset_index()
+                for y, g in nm.groupby("決算年度"):
+                    _save_df(g, f"{PREFIX}/city/_index/{int(y)}.parquet")
+            for it in ok_urls:
+                state[it["url"]] = it["modified"]
+            _save_json(state, state_path)
+            done += 1
+            print(f"✅ {max(it['year'] for it in cats[cid])}年: {len(parts)}ファイル（表×都道府県）/ {sum(n for _, n in res):,}件 / 経過 {int((time.time() - t0) / 60)}分", flush=True)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    if done:
+        reindex_city()
+    left = len(changed) - done
+    print(f"🏁 完了: {done}カタログ / 残り {left}カタログ / エラー{len(errors)}件", flush=True)
+    for e in errors:
+        print("  ❌", e)
+    if errors:
+        raise RuntimeError(f"{len(errors)}件のCSVが取り込めませんでした（上記ログ参照）")
+    return done
+
+
+def reindex_city() -> int:
+    # 年度ごとの名称の一覧（_index/{年度}.parquet）から、表一覧・行列一覧を作り直す
+    paths = sorted(b.name for b in _bucket().client.list_blobs(BUCKET_NAME, prefix=f"{PREFIX}/city/_index/") if b.name.endswith(".parquet"))
+    if not paths:
+        return 0
+    nm = pd.concat([pd.read_parquet(io.BytesIO(_bucket().blob(p).download_as_bytes())) for p in paths], ignore_index=True)
+    tables, metas = [], []
+    for hyo, g in nm.groupby("表番号"):
+        t, m = _index_rows(g.reset_index(drop=True))
+        tables.append(t)
+        metas.append(m)
+    _save_index("city", tables, metas)
+    print(f"[reindex_city] 年度{len(paths)} 表番号{len(tables)}", flush=True)
+    return len(tables)

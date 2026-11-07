@@ -488,8 +488,9 @@ async def jma_nagano(
 async def chizai_meta(
     hyo: Annotated[Optional[str], Field(description="表番号2桁。省略時は表の一覧を返す。例: 02")] = None,
     nendo: Annotated[Optional[int], Field(description="この決算年度に収録があるものだけ返す。例: 2024")] = None,
+    kubun: Annotated[Optional[str], Field(description="pref=都道府県分（既定）/ city=市町村分（一部事務組合等を含む。表番号の体系は都道府県分と別）")] = None,
 ) -> str:
-    """地方財政状況調査（都道府県分 調査表）の表一覧、または指定した表の行・列の一覧を返す。
+    """地方財政状況調査（都道府県分・市町村分 調査表）の表一覧、または指定した表の行・列の一覧を返す。
 
     chizai_get の前に使う。hyo 省略で表の一覧、hyo 指定でその表の行・列の一覧。
     同じ表番号・行番号・列番号が年度により別の表・項目を指すことがあるため、
@@ -498,8 +499,8 @@ async def chizai_meta(
     e-StatのDB（estat_pass）は2017年度で更新停止のため、それ以降はこちらを使う。
     """
     if hyo is None:
-        return await _get("/chizai/tables", {"kubun": "pref", "nendo": nendo})
-    return await _get("/chizai/meta", {"kubun": "pref", "hyo": hyo, "nendo": nendo})
+        return await _get("/chizai/tables", {"kubun": kubun or "pref", "nendo": nendo})
+    return await _get("/chizai/meta", {"kubun": kubun or "pref", "hyo": hyo, "nendo": nendo})
 
 
 @mcp.tool()
@@ -507,7 +508,7 @@ async def chizai_get(
     hyo: Annotated[str, Field(description="表番号2桁。例: 02（決算収支の状況）")],
     nendo_from: Annotated[Optional[int], Field(description="決算年度（西暦）の開始。例: 2018")] = None,
     nendo_to: Annotated[Optional[int], Field(description="決算年度（西暦）の終了。例: 2024")] = None,
-    dantai: Annotated[Optional[str], Field(description="団体コード6桁 または 市区町村コード5桁。カンマ区切り。例: 20000（長野県）、00000（全国）")] = None,
+    dantai: Annotated[Optional[str], Field(description="団体コード6桁 または 市区町村コード5桁。カンマ区切り。例: 20000（長野県）、00000（全国）。市町村分は必須で、都道府県コード2桁（例: 20）でその県内の全団体")] = None,
     gyo: Annotated[Optional[str], Field(description="行番号。カンマ区切り。例: 01")] = None,
     retsu: Annotated[Optional[str], Field(description="列番号。カンマ区切り。例: 001,005")] = None,
     gyo_name: Annotated[Optional[str], Field(description="行名称で絞込（空白・中黒・名称中の年度の違いは無視）。| 区切りで複数可。例: 市中銀行")] = None,
@@ -516,8 +517,9 @@ async def chizai_get(
     item: Annotated[Optional[str], Field(description="統一項目名または項目コード（項目対応表のある表のみ。現在は表01〜13・15・16・18〜25・29〜31・33・34・36・37・39〜41・45・50・51・90・91・46・47・53〜66（2011年度〜））。| 区切りで複数可。一覧は chizai_items。例: 地方税")] = None,
     shihyo: Annotated[Optional[str], Field(description="指標名（2次元の表で列の指標を統一したもの。例: 表15の 決算額）。一覧は chizai_items の 軸=列")] = None,
     limit: Annotated[Optional[int], Field(description="取得件数の上限")] = None,
+    kubun: Annotated[Optional[str], Field(description="pref=都道府県分（既定）/ city=市町村分（一部事務組合等を含む。表番号の体系は都道府県分と別）")] = None,
 ) -> str:
-    """総務省「地方財政状況調査」都道府県分 調査表の数値を縦持ちで取得する（1989年度〜最新）。
+    """総務省「地方財政状況調査」調査表の数値を縦持ちで取得する（1989年度〜最新）。
 
     番号は chizai_meta で確認する。金額は原則千円。全国計は団体コード 000000。
     表02（決算収支）は行01=当年度・行02=前年度なので、推移を見るときは gyo=01。
@@ -525,9 +527,11 @@ async def chizai_get(
     長期間の推移は、項目対応表のある表（現在は表01〜13・15・16・18〜25・29〜31・33・34・36・37・39〜41・45・50・51・90・91・46・47・53〜66（2011年度〜））は item（行の項目）と shihyo（列の指標）で、それ以外は gyo_name・retsu_name で絞ること。
     表04・46・47・16（2020年度〜）の行02以降は様式の続きで列名称が null（内容は項目名で分かる）。
     応答が大きくなりやすいため、hyo に加えて dantai・列・年度で絞ること。
+    市町村分（kubun=city）は表番号・様式が都道府県分と別体系で、項目対応表はまだない（gyo_name・retsu_name で絞る）。
+    dantai が必須（例: 20＝長野県内の全市町村・一部事務組合、202011＝長野市）。
     """
     return await _get("/chizai/data", {
-        "kubun": "pref", "hyo": hyo, "nendo_from": nendo_from, "nendo_to": nendo_to,
+        "kubun": kubun or "pref", "hyo": hyo, "nendo_from": nendo_from, "nendo_to": nendo_to,
         "dantai": dantai, "gyo": gyo, "retsu": retsu, "gyo_name": gyo_name, "retsu_name": retsu_name,
         "name_match": name_match, "item": item, "shihyo": shihyo, "limit": limit, "format": "json",
     })
@@ -538,7 +542,7 @@ async def chizai_items(
     hyo: Annotated[str, Field(description="表番号2桁。現在の対象: 01〜13・15・16・18〜25・29〜31・33・34・36・37・39〜41・45〜47・50・51・53〜66・90・91")],
     detail: Annotated[Optional[bool], Field(description="true で年度範囲ごとの行番号・列番号・元の名称も返す")] = None,
 ) -> str:
-    """地方財政状況調査の項目対応表（統一項目の一覧）を返す。
+    """地方財政状況調査（都道府県分）の項目対応表（統一項目の一覧）を返す。
 
     chizai_get の item に指定できる項目名・項目コードと、収録年度・備考（改名・統合・区分変更の注意）。
     項目名は「親/子」の形（例: 国庫支出金/普通建設事業費支出金）。
