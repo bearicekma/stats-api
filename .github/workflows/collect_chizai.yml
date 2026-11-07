@@ -16,6 +16,12 @@ on:
         default: 'dryrun'
         type: choice
         options: [dryrun, full, update, reindex, fixcont_dryrun, fixcont]
+      kubun:
+        description: 'pref=都道府県分 / city=市町村分'
+        required: true
+        default: 'pref'
+        type: choice
+        options: [pref, city]
 
 concurrency:
   group: collect-chizai
@@ -53,7 +59,7 @@ jobs:
           ESTAT_APP_ID: ${{ secrets.ESTAT_APP_ID }}
         run: |
           set -o pipefail
-          PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} pref 2>&1 | tee /tmp/chizai_output.log
+          PYTHONUNBUFFERED=1 python scripts/collect_chizai.py ${{ github.event.inputs.mode || 'update' }} ${{ github.event.inputs.kubun || 'pref' }} 2>&1 | tee /tmp/chizai_output.log
 
       - name: 認証情報を削除
         if: always()
@@ -64,7 +70,7 @@ jobs:
         if: always()
         env:
           STATUS: ${{ steps.run.outcome }}
-          MODE: ${{ github.event.inputs.mode || 'update' }}
+          MODE: ${{ github.event.inputs.mode || 'update' }} ${{ github.event.inputs.kubun || 'pref' }}
         run: |
           mkdir -p /tmp/chizailog && cd /tmp/chizailog
           {

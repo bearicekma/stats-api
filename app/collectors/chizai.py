@@ -30,8 +30,8 @@ PREFIX        = "chizai"
 API_INTERVAL  = 30   # カタログAPIの呼出間隔（秒）。e-StatはIP単位で429になるため直列・間隔あり
 FILE_INTERVAL = 2    # CSVダウンロードの間隔（秒）
 
-# 区分 → カタログ検索語。市町村分は後で "city": "市町村分" を追加する
-KUBUN_WORD = {"pref": "都道府県分"}
+# 区分 → カタログ検索語
+KUBUN_WORD = {"pref": "都道府県分", "city": "市町村分"}
 
 # CSV先頭10列の標準名（年代で「県名」等の表記揺れ・末尾空白があるため位置で付け直す）
 HEAD10   = ["決算年度", "業務コード", "団体コード", "都道府県名", "団体名", "団体区分", "表番号", "表名称", "行番号", "行名称"]
@@ -390,11 +390,14 @@ def run(kubun: str = "pref", mode: str = "dryrun") -> int:
         print(per_cat.to_string())
         sample = items[-1]
         print("サンプル:", sample)
-        with httpx.Client(timeout=120, follow_redirects=True) as client:
+        last = [it for it in items if it["catalog"] == sample["catalog"]]
+        print(f"同じカタログのファイル {len(last)}件:", " / ".join(it["name"] for it in last)[:3000])
+        with httpx.Client(timeout=300, follow_redirects=True) as client:
             r = client.get(sample["url"])
             r.raise_for_status()
+        print(f"サンプルの大きさ {len(r.content):,} bytes", flush=True)
         df = normalize(r.content)
-        print(df.shape)
+        print(df.shape, f"団体数 {df['団体コード'].nunique()}", df["団体区分"].value_counts(dropna=False).head(10).to_dict())
         print(df.head(12).to_string())
         print(df.groupby(["決算年度", "表番号", "表名称"]).size())
         return 0
