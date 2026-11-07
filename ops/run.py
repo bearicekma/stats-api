@@ -1,4 +1,4 @@
-# 目的：地方財政状況調査（都道府県分）表18・31・91（作り直した組み立て処理の確認用）の項目対応表づくりの材料を出力する（読み取りのみ・GCSへの書き込みなし）
+# 目的：地方財政状況調査（都道府県分）表16（人件費の状況）の項目対応表づくりの材料を出力する（読み取りのみ・GCSへの書き込みなし）
 # 内容：e-Stat旧DB（〜2017年度）の各セル（分類コードの組）とCSVの各セル（行番号×列番号）を、団体ごとの値の並びで照合し、
 #       一意に一致したものを出力する。あわせてCSVの行・列の名称と全国計の値、旧DBの分類の名称を出力する
 
@@ -12,7 +12,7 @@ import pandas as pd
 from google.cloud import storage
 
 API = "https://stats-api-709252231118.asia-northeast1.run.app"
-TARGETS = [("18", "0003173110"), ("31", "0003173094"), ("91", "0003173111")]
+TARGETS = [("16", "0003173070")]
 AREAS = None  # None=全団体
 bucket = storage.Client().bucket(os.environ.get("GCS_BUCKET_NAME", "stats-api-491107-data"))
 
