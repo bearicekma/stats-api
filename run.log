@@ -1,0 +1,9 @@
+commit: 3e03c0c580d0883ed23907e74dbf88d49a0fd46d
+status: success
+finished_at: 2026-11-08 11:32:16 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/42438858435
+----
+対象: 1件
+/opt/hostedtoolcache/Python/3.11.18/x64/lib/python3.11/site-packages/fitz/__init__.py:17: FutureWarning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+  warnings.warn(
+[1] 差し替え：1,579,344 → 887,785 bytes 圧縮: 写真1p（全文 1757文字）
