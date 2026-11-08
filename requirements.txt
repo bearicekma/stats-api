@@ -18,7 +18,7 @@ google-cloud-vision
 pymupdf
 Pillow
 python-multipart
-google-genai
+google-genai<3
 yt-dlp
 youtube-transcript-api
 google-auth-oauthlib

@@ -248,7 +248,9 @@ def _analyze_pdf(pdf_bytes):
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    # 接続先は v1beta に固定（google-genai 3.0 から既定が v1 になり、v1 は JSON モード非対応で 400 になるため）
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
+                          http_options=types.HttpOptions(api_version="v1beta"))
 
     prompt = (
         "これは日本経済新聞の紙面、または電子版記事のPDFです。次のJSONだけを出力してください。\n"
