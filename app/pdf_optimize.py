@@ -18,6 +18,7 @@ TEXT_MIN_DPI      = 100    #   …元画像の解像度が分からない・低�
 TEXT_WHITE_POINT  = 225    # 文字ページ：これより明るい画素（紙の地色）は真っ白にする
 TEXT_BLACK_POINT  = 40     #   …これより暗い画素は真っ黒にし、その間を引き伸ばして文字を濃くする
 TEXT_JPEG_QUALITY = 60     # 文字ページ：JPEG画質
+MIN_FONTSIZE      = 0.5    # 不可視テキストの最小文字サイズ（pt）。これでも収まらなければ埋め込みを諦める
 CLASSIFY_DPI      = 100    # ページ判定用に描画する解像度
 PHOTO_AREA_RATIO  = 0.01   # 中間調または彩色の「面」がページのこの割合を超えたら写真入りとみなす
 REWRITE_DPI_OVER  = 220    # 写真入りページ：これを超える解像度の画像だけ…
@@ -94,9 +95,19 @@ def _add_invisible_text(doc, text: str):
     for i, page in enumerate(doc):
         part = text[i * chunk:(i + 1) * chunk]
         if part:
-            page.insert_textbox(page.rect, part,
-                                fontsize=_pick_fontsize(len(part)),
-                                fontname="japan", render_mode=3)
+            _insert_fitting_text(page, part)
+
+
+def _insert_fitting_text(page, part: str):
+    # 不可視テキストをページ全体の枠に書き込む。PyMuPDF は枠に収まらないと何も書かないため、
+    # 収まるまで文字サイズを2割ずつ小さくして再試行する（小さいページに長い本文でも埋め込めるように）
+    fs = _pick_fontsize(len(part))
+    while fs >= MIN_FONTSIZE:
+        rc = page.insert_textbox(page.rect, part, fontsize=fs, fontname="japan", render_mode=3)
+        if rc >= 0:
+            return
+        fs *= 0.8
+    raise ValueError(f"不可視テキストがページに収まらない（{len(part)}文字）")
 
 
 def _is_photo_page(page) -> bool:
