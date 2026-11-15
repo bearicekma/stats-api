@@ -1,0 +1,11 @@
+commit: 3e03c0c580d0883ed23907e74dbf88d49a0fd46d
+mode: update
+status: success
+finished_at: 2026-11-15 10:04:59 JST
+run_url: https://github.com/bearicekma/stats-api/actions/runs/43661317234
+----
+🚀 在留外国人統計 収集開始 mode=update
+[estat] getDataCatalog start=1 status=200 bytes=51007
+📋 市区町村別テーブルデータ 5件: ['202312', '202406', '202412', '202506', '202512']
+🎯 取込対象 0件: []
+✅ 終了: 0時点
